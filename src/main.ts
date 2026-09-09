@@ -5,12 +5,21 @@ import started from 'electron-squirrel-startup';
 import { ProductRepository } from './database/product-repository';
 import type { CreateProductInput } from './shared/product';
 
+const applicationId = 'com.yihang.releasehub';
+
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
   app.quit();
 }
 
+if (process.platform === 'win32') {
+  app.setAppUserModelId(applicationId);
+}
+
 let productRepository: ProductRepository | undefined;
+
+const getDevelopmentIconPath = (): string =>
+  path.join(app.getAppPath(), 'assets', 'icons', 'release-hub.png');
 
 const createWindow = () => {
   // Create the browser window.
@@ -19,7 +28,8 @@ const createWindow = () => {
     height: 600,
     minWidth: 960,
     minHeight: 640,
-    title: 'Release Hub',
+    title: 'ReleaseHub',
+    icon: app.isPackaged ? undefined : getDevelopmentIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
     },
@@ -66,6 +76,10 @@ const registerProductIpcHandlers = (repository: ProductRepository) => {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.on('ready', () => {
+  if (process.platform === 'darwin' && !app.isPackaged) {
+    app.dock.setIcon(getDevelopmentIconPath());
+  }
+
   productRepository = new ProductRepository(getDatabasePath());
   registerProductIpcHandlers(productRepository);
   createWindow();
