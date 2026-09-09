@@ -1,9 +1,13 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
 
 import { ProductRepository } from './database/product-repository';
-import type { CreateProductInput } from './shared/product';
+import type {
+  CreateProductInput,
+  RepositoryProvider,
+  VerifiedConnection,
+} from './shared/product';
 
 const applicationId = 'com.yihang.releasehub';
 
@@ -67,8 +71,100 @@ const getDatabasePath = (): string => {
 
 const registerProductIpcHandlers = (repository: ProductRepository) => {
   ipcMain.handle('products:list', () => repository.list());
-  ipcMain.handle('products:create', (_event, input: CreateProductInput) =>
-    repository.create(input),
+  ipcMain.handle('products:create', (_event, input: CreateProductInput) => {
+    if (!repository.hasVerifiedConnection(input.repositoryProvider)) {
+      throw new Error('请先在设置中验证对应平台的 Token');
+    }
+
+    return repository.create(input);
+  });
+};
+
+const validateDefaultBranch = (defaultBranch: string): string => {
+  const branch = defaultBranch?.trim();
+
+  if (!branch) {
+    throw new Error('请输入默认分支');
+  }
+
+  if (branch.length > 255 || /[\s~^:?*\[\\]/.test(branch)) {
+    throw new Error('默认分支名称格式不正确');
+  }
+
+  return branch;
+};
+
+const verifyProviderToken = async (
+  provider: RepositoryProvider,
+  token: string,
+): Promise<VerifiedConnection> => {
+  if (provider !== 'github' && provider !== 'gitee') {
+    throw new Error('不支持的代码托管平台');
+  }
+
+  const normalizedToken = token?.trim();
+
+  if (!normalizedToken) {
+    throw new Error('请输入 Token');
+  }
+
+  const request =
+    provider === 'github'
+      ? fetch('https://api.github.com/user', {
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${normalizedToken}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+          signal: AbortSignal.timeout(10000),
+        })
+      : fetch(
+          `https://gitee.com/api/v5/user?access_token=${encodeURIComponent(normalizedToken)}`,
+          { signal: AbortSignal.timeout(10000) },
+        );
+  const response = await request;
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('Token 无效或已过期');
+    }
+
+    throw new Error(`验证失败（HTTP ${response.status}）`);
+  }
+
+  const profile = (await response.json()) as { login?: unknown };
+  if (typeof profile.login !== 'string' || !profile.login) {
+    throw new Error('无法识别授权账号');
+  }
+
+  return {
+    provider,
+    accountLogin: profile.login,
+    verifiedAt: Date.now(),
+  };
+};
+
+const registerSettingsIpcHandlers = (repository: ProductRepository) => {
+  ipcMain.handle('settings:get', () => repository.getSettings());
+  ipcMain.handle('settings:update-default-branch', (_event, defaultBranch: string) => {
+    repository.updateDefaultBranch(validateDefaultBranch(defaultBranch));
+    return repository.getSettings();
+  });
+  ipcMain.handle(
+    'settings:verify-and-save-token',
+    async (_event, provider: RepositoryProvider, token: string) => {
+      const verifiedConnection = await verifyProviderToken(provider, token);
+
+      if (!safeStorage.isEncryptionAvailable()) {
+        throw new Error('当前系统无法安全保存 Token');
+      }
+
+      repository.saveVerifiedConnection(
+        verifiedConnection,
+        safeStorage.encryptString(token.trim()),
+      );
+      return repository.getSettings();
+    },
   );
 };
 
@@ -82,6 +178,7 @@ app.on('ready', () => {
 
   productRepository = new ProductRepository(getDatabasePath());
   registerProductIpcHandlers(productRepository);
+  registerSettingsIpcHandlers(productRepository);
   createWindow();
 });
 

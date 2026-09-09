@@ -5,6 +5,7 @@ import {
 } from '@ant-design/icons';
 import {
   Button,
+  Card,
   ConfigProvider,
   Empty,
   Form,
@@ -14,13 +15,20 @@ import {
   message,
   Modal,
   Radio,
+  Space,
   Table,
+  Tag,
   Typography,
 } from 'antd';
 import type { MenuProps, TableColumnsType } from 'antd';
 import { useEffect, useState } from 'react';
 
-import type { CreateProductInput, Product } from './shared/product';
+import type {
+  AppSettings,
+  CreateProductInput,
+  Product,
+  RepositoryProvider,
+} from './shared/product';
 
 type PageKey = 'products' | 'settings';
 type ProductFormValues = CreateProductInput;
@@ -63,7 +71,15 @@ function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isSavingProduct, setIsSavingProduct] = useState(false);
+  const [isSavingBranch, setIsSavingBranch] = useState(false);
+  const [verifyingProvider, setVerifyingProvider] =
+    useState<RepositoryProvider | null>(null);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [tokens, setTokens] = useState<
+    Partial<Record<RepositoryProvider, string>>
+  >({});
   const [form] = Form.useForm<ProductFormValues>();
+  const [settingsForm] = Form.useForm<{ defaultBranch: string }>();
   const [messageApi, messageContextHolder] = message.useMessage();
 
   const loadProducts = async () => {
@@ -77,13 +93,83 @@ function App() {
     }
   };
 
+  const loadSettings = async () => {
+    try {
+      const savedSettings = await window.releaseHub.settings.get();
+      setSettings(savedSettings);
+      settingsForm.setFieldsValue({
+        defaultBranch: savedSettings.defaultBranch,
+      });
+    } catch (error) {
+      const description =
+        error instanceof Error ? error.message : '请稍后重试';
+      messageApi.error(`读取设置失败：${description}`);
+    }
+  };
+
   useEffect(() => {
     void loadProducts();
+    void loadSettings();
   }, [messageApi]);
+
+  const isProviderConfigured = (provider: RepositoryProvider): boolean =>
+    Boolean(
+      settings?.connections.find((connection) => connection.provider === provider)
+        ?.configured,
+    );
+
+  const hasConfiguredProvider =
+    isProviderConfigured('github') || isProviderConfigured('gitee');
 
   const openCreateProductModal = () => {
     form.resetFields();
+    form.setFieldsValue({
+      repositoryProvider: isProviderConfigured('github') ? 'github' : 'gitee',
+    });
     setIsCreateModalOpen(true);
+  };
+
+  const saveDefaultBranch = async (values: { defaultBranch: string }) => {
+    setIsSavingBranch(true);
+
+    try {
+      const savedSettings = await window.releaseHub.settings.updateDefaultBranch(
+        values.defaultBranch,
+      );
+      setSettings(savedSettings);
+      messageApi.success('默认分支已保存');
+    } catch (error) {
+      const description =
+        error instanceof Error ? error.message : '请检查分支名称后重试';
+      messageApi.error(`保存默认分支失败：${description}`);
+    } finally {
+      setIsSavingBranch(false);
+    }
+  };
+
+  const verifyAndSaveToken = async (provider: RepositoryProvider) => {
+    const token = tokens[provider]?.trim();
+    if (!token) {
+      messageApi.warning('请输入 Token 后再验证');
+      return;
+    }
+
+    setVerifyingProvider(provider);
+    try {
+      const savedSettings = await window.releaseHub.settings.verifyAndSaveToken(
+        provider,
+        token,
+      );
+      setSettings(savedSettings);
+      setTokens((currentTokens) => ({ ...currentTokens, [provider]: '' }));
+      messageApi.success(`${provider === 'github' ? 'GitHub' : 'Gitee'} Token 验证成功`);
+    } catch (error) {
+      const description =
+        error instanceof Error ? error.message : '请稍后重试';
+      messageApi.error(`Token 验证失败：${description}`);
+    } finally {
+      setVerifyingProvider(null);
+    }
   };
 
   const closeCreateProductModal = () => {
@@ -110,10 +196,16 @@ function App() {
   const renderProductsPage = () => (
     <>
       <div className="page-header">
+        {!hasConfiguredProvider && (
+          <Typography.Text type="secondary">
+            请先在设置中验证 GitHub 或 Gitee Token
+          </Typography.Text>
+        )}
         <Button
           type="primary"
           icon={<PlusOutlined />}
           onClick={openCreateProductModal}
+          disabled={!hasConfiguredProvider}
         >
           新增产品
         </Button>
@@ -136,14 +228,84 @@ function App() {
     </>
   );
 
-  const renderSettingsPage = () => (
-    <div className="settings-placeholder">
-      <Typography.Title level={2}>设置</Typography.Title>
-      <Typography.Paragraph type="secondary">
-        GitHub、Gitee 仓库连接和本地数据管理将在这里配置。
-      </Typography.Paragraph>
-    </div>
-  );
+  const renderSettingsPage = () => {
+    const renderConnection = (provider: RepositoryProvider, label: string) => {
+      const connection = settings?.connections.find(
+        (item) => item.provider === provider,
+      );
+      const isConnected = connection?.configured;
+
+      return (
+        <Card className="settings-card" title={label} size="small">
+          <Space direction="vertical" size={12} className="settings-card-content">
+            <div className="connection-status">
+              <Tag color={isConnected ? 'success' : 'default'}>
+                {isConnected ? '已连接' : '未连接'}
+              </Tag>
+              {isConnected && <span>{connection?.accountLogin}</span>}
+            </div>
+            <Input.Password
+              value={tokens[provider] || ''}
+              placeholder={`请输入 ${label} Token`}
+              onChange={(event) =>
+                setTokens((currentTokens) => ({
+                  ...currentTokens,
+                  [provider]: event.target.value,
+                }))
+              }
+            />
+            <Button
+              type="primary"
+              loading={verifyingProvider === provider}
+              onClick={() => void verifyAndSaveToken(provider)}
+            >
+              验证并保存
+            </Button>
+            <Typography.Text type="secondary" className="connection-hint">
+              {isConnected && connection?.verifiedAt
+                ? `最近验证：${new Date(connection.verifiedAt).toLocaleString()}`
+                : '验证成功后才会保存 Token。'}
+            </Typography.Text>
+          </Space>
+        </Card>
+      );
+    };
+
+    return (
+      <div className="settings-page">
+        <Typography.Title level={2}>设置</Typography.Title>
+        <Space direction="vertical" size={20} className="settings-stack">
+          <Card title="默认发布分支" size="small">
+            <Form
+              form={settingsForm}
+              layout="inline"
+              onFinish={saveDefaultBranch}
+            >
+              <Form.Item
+                name="defaultBranch"
+                rules={[{ required: true, message: '请输入默认分支' }]}
+              >
+                <Input placeholder="例如：main" />
+              </Form.Item>
+              <Form.Item>
+                <Button
+                  type="primary"
+                  htmlType="submit"
+                  loading={isSavingBranch}
+                >
+                  保存
+                </Button>
+              </Form.Item>
+            </Form>
+          </Card>
+          <div className="connection-cards">
+            {renderConnection('github', 'GitHub')}
+            {renderConnection('gitee', 'Gitee')}
+          </div>
+        </Space>
+      </div>
+    );
+  };
 
   return (
     <ConfigProvider
@@ -205,7 +367,6 @@ function App() {
           form={form}
           layout="vertical"
           requiredMark={false}
-          initialValues={{ repositoryProvider: 'github' }}
           onFinish={createProduct}
         >
           <Form.Item
@@ -229,8 +390,12 @@ function App() {
             rules={[{ required: true, message: '请选择代码托管平台' }]}
           >
             <Radio.Group>
-              <Radio value="github">GitHub</Radio>
-              <Radio value="gitee">Gitee</Radio>
+              <Radio value="github" disabled={!isProviderConfigured('github')}>
+                GitHub
+              </Radio>
+              <Radio value="gitee" disabled={!isProviderConfigured('gitee')}>
+                Gitee
+              </Radio>
             </Radio.Group>
           </Form.Item>
 

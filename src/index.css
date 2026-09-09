@@ -56,7 +56,7 @@ body {
 .page-header {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 24px;
   margin-bottom: 20px;
 }
@@ -78,6 +78,36 @@ body {
 
 .settings-placeholder {
   padding-top: 4px;
+}
+
+.settings-page {
+  max-width: 880px;
+}
+
+.settings-page > .ant-typography {
+  margin-bottom: 24px;
+}
+
+.settings-stack,
+.settings-card-content {
+  width: 100%;
+}
+
+.connection-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.connection-hint {
+  font-size: 12px;
 }
 
 .create-product-modal .ant-modal-header {
@@ -125,6 +155,10 @@ body {
 
   .page-header .ant-btn {
     align-self: flex-start;
+  }
+
+  .connection-cards {
+    grid-template-columns: 1fr;
   }
 }
 

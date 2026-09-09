@@ -4,9 +4,12 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import type {
+  AppSettings,
   CreateProductInput,
   Product,
+  ProviderConnection,
   RepositoryProvider,
+  VerifiedConnection,
 } from '../shared/product';
 
 interface ProductRow {
@@ -21,6 +24,16 @@ interface ProductRow {
 
 interface MigrationRow {
   version: number;
+}
+
+interface SettingRow {
+  value: string;
+}
+
+interface ConnectionRow {
+  provider: RepositoryProvider;
+  accountLogin: string;
+  verifiedAt: number;
 }
 
 const migrations = [
@@ -38,6 +51,29 @@ const migrations = [
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE (repository_provider, repository_url)
+      );
+    `,
+  },
+  {
+    version: 2,
+    name: '创建应用设置与代码托管连接表',
+    sql: `
+      CREATE TABLE app_settings (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES ('default_branch', 'main', unixepoch() * 1000);
+
+      CREATE TABLE provider_connections (
+        provider TEXT PRIMARY KEY NOT NULL
+          CHECK (provider IN ('github', 'gitee')),
+        encrypted_token BLOB NOT NULL,
+        account_login TEXT NOT NULL,
+        verified_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
       );
     `,
   },
@@ -109,6 +145,83 @@ export class ProductRepository {
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  getSettings(): AppSettings {
+    const branchStatement = this.database.prepare(
+      "SELECT value FROM app_settings WHERE key = 'default_branch'",
+    );
+    const connectionStatement = this.database.prepare(`
+      SELECT
+        provider,
+        account_login AS accountLogin,
+        verified_at AS verifiedAt
+      FROM provider_connections
+    `);
+    const branchRow = branchStatement.get() as unknown as SettingRow | undefined;
+    const connectionRows = connectionStatement.all() as unknown as ConnectionRow[];
+    const connectionByProvider = new Map(
+      connectionRows.map((connection) => [connection.provider, connection]),
+    );
+    const connections: ProviderConnection[] = ['github', 'gitee'].map(
+      (provider) => {
+        const connection = connectionByProvider.get(provider as RepositoryProvider);
+        return {
+          provider: provider as RepositoryProvider,
+          configured: Boolean(connection),
+          accountLogin: connection?.accountLogin || null,
+          verifiedAt: connection?.verifiedAt || null,
+        };
+      },
+    );
+
+    return {
+      defaultBranch: branchRow?.value || 'main',
+      connections,
+    };
+  }
+
+  updateDefaultBranch(defaultBranch: string): void {
+    const statement = this.database.prepare(`
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES ('default_branch', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `);
+    statement.run(defaultBranch, Date.now());
+  }
+
+  saveVerifiedConnection(
+    connection: VerifiedConnection,
+    encryptedToken: Uint8Array,
+  ): void {
+    const statement = this.database.prepare(`
+      INSERT INTO provider_connections (
+        provider,
+        encrypted_token,
+        account_login,
+        verified_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(provider) DO UPDATE SET
+        encrypted_token = excluded.encrypted_token,
+        account_login = excluded.account_login,
+        verified_at = excluded.verified_at,
+        updated_at = excluded.updated_at
+    `);
+    statement.run(
+      connection.provider,
+      encryptedToken,
+      connection.accountLogin,
+      connection.verifiedAt,
+      Date.now(),
+    );
+  }
+
+  hasVerifiedConnection(provider: RepositoryProvider): boolean {
+    const statement = this.database.prepare(
+      'SELECT provider FROM provider_connections WHERE provider = ?',
+    );
+    return Boolean(statement.get(provider));
   }
 
   close(): void {
