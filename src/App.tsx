@@ -163,6 +163,13 @@ function App() {
     try {
       const savedSettings = await window.releaseHub.settings.get();
       setSettings(savedSettings);
+      setTokens(
+        Object.fromEntries(
+          savedSettings.connections
+            .filter((connection) => connection.token)
+            .map((connection) => [connection.provider, connection.token]),
+        ),
+      );
       settingsForm.setFieldsValue({
         defaultBranch: savedSettings.defaultBranch,
       });
@@ -225,7 +232,13 @@ function App() {
         token,
       );
       setSettings(savedSettings);
-      setTokens((currentTokens) => ({ ...currentTokens, [provider]: '' }));
+      setTokens(
+        Object.fromEntries(
+          savedSettings.connections
+            .filter((connection) => connection.token)
+            .map((connection) => [connection.provider, connection.token]),
+        ),
+      );
       messageApi.success(`${provider === 'github' ? 'GitHub' : 'Gitee'} Token 验证成功`);
     } catch (error) {
       const description = readableErrorMessage(error, '请稍后重试');
@@ -499,14 +512,23 @@ function App() {
       const isConnected = connection?.configured;
 
       return (
-        <Card className="settings-card" title={label} size="small">
-          <Space direction="vertical" size={12} className="settings-card-content">
-            <div className="connection-status">
+        <Card
+          className="settings-card"
+          title={
+            <div className="connection-card-title">
+              <span>{label}</span>
               <Tag color={isConnected ? 'success' : 'default'}>
                 {isConnected ? '已连接' : '未连接'}
               </Tag>
-              {isConnected && <span>{connection?.accountLogin}</span>}
             </div>
+          }
+          size="small"
+        >
+          <Space direction="vertical" size={12} className="settings-card-content">
+            <div className="connection-account">
+              {isConnected ? `已验证账号：${connection?.accountLogin}` : '尚未验证 Token'}
+            </div>
+            <Typography.Text className="token-field-label">访问令牌</Typography.Text>
             <Input.Password
               value={tokens[provider] || ''}
               placeholder={`请输入 ${label} Token`}
@@ -536,9 +558,8 @@ function App() {
 
     return (
       <div className="settings-page">
-        <Typography.Title level={2}>设置</Typography.Title>
         <Space direction="vertical" size={20} className="settings-stack">
-          <Card title="默认发布分支" size="small">
+          <Card className="branch-settings-card" title="默认发布分支" size="small">
             <Form
               form={settingsForm}
               layout="inline"
@@ -561,10 +582,12 @@ function App() {
               </Form.Item>
             </Form>
           </Card>
-          <div className="connection-cards">
-            {renderConnection('github', 'GitHub')}
-            {renderConnection('gitee', 'Gitee')}
-          </div>
+          <Card className="provider-settings-card" title="代码托管平台" size="small">
+            <div className="connection-cards">
+              {renderConnection('github', 'GitHub')}
+              {renderConnection('gitee', 'Gitee')}
+            </div>
+          </Card>
         </Space>
       </div>
     );

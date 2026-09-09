@@ -141,6 +141,22 @@ const getProviderToken = (
   );
 };
 
+const getSettingsForRenderer = (repository: ProductRepository) => {
+  const settings = repository.getSettings();
+  return {
+  ...settings,
+  connections: settings.connections.map((connection) => ({
+    ...connection,
+    token:
+      connection.configured && safeStorage.isEncryptionAvailable()
+        ? safeStorage.decryptString(
+            Buffer.from(repository.getEncryptedToken(connection.provider)),
+          )
+        : null,
+  })),
+  };
+};
+
 const inspectProductRepository = async (
   repository: ProductRepository,
   input: CreateProductInput,
@@ -232,10 +248,10 @@ const verifyProviderToken = async (
 };
 
 const registerSettingsIpcHandlers = (repository: ProductRepository) => {
-  ipcMain.handle('settings:get', () => repository.getSettings());
+  ipcMain.handle('settings:get', () => getSettingsForRenderer(repository));
   ipcMain.handle('settings:update-default-branch', (_event, defaultBranch: string) => {
     repository.updateDefaultBranch(validateDefaultBranch(defaultBranch));
-    return repository.getSettings();
+    return getSettingsForRenderer(repository);
   });
   ipcMain.handle(
     'settings:verify-and-save-token',
@@ -250,7 +266,7 @@ const registerSettingsIpcHandlers = (repository: ProductRepository) => {
         verifiedConnection,
         safeStorage.encryptString(token.trim()),
       );
-      return repository.getSettings();
+      return getSettingsForRenderer(repository);
     },
   );
 };

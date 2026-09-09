@@ -85,11 +85,7 @@ body {
 }
 
 .settings-page {
-  max-width: 880px;
-}
-
-.settings-page > .ant-typography {
-  margin-bottom: 24px;
+  width: 100%;
 }
 
 .settings-stack,
@@ -103,15 +99,49 @@ body {
   gap: 20px;
 }
 
-.connection-status {
+.settings-card,
+.branch-settings-card,
+.provider-settings-card {
+  border-color: #e6ebf1;
+  box-shadow: none;
+}
+
+.settings-card .ant-card-head,
+.branch-settings-card .ant-card-head,
+.provider-settings-card .ant-card-head {
+  min-height: 48px;
+  padding-inline: 18px;
+}
+
+.settings-card .ant-card-body,
+.branch-settings-card .ant-card-body,
+.provider-settings-card .ant-card-body {
+  padding: 18px;
+}
+
+.connection-card-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 24px;
+}
+
+.connection-account {
+  color: #667085;
+  font-size: 13px;
+}
+
+.token-field-label {
+  color: #344054;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .connection-hint {
   font-size: 12px;
+}
+
+.settings-card .ant-btn {
+  align-self: flex-start;
 }
 
 .version-page {

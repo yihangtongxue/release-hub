@@ -82,6 +82,7 @@ export interface ProviderConnection {
   configured: boolean;
   accountLogin: string | null;
   verifiedAt: number | null;
+  token: string | null;
 }
 
 export interface AppSettings {

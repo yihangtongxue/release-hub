@@ -323,6 +323,7 @@ export class ProductRepository {
           configured: Boolean(connection),
           accountLogin: connection?.accountLogin || null,
           verifiedAt: connection?.verifiedAt || null,
+          token: null,
         };
       },
     );
