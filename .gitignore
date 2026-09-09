@@ -90,3 +90,6 @@ typings/
 
 # Electron-Forge
 out/
+
+# 本地开发数据库
+.release-hub/

@@ -1,17 +1,25 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
+
+import { ProductRepository } from './database/product-repository';
+import type { CreateProductInput } from './shared/product';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
   app.quit();
 }
 
+let productRepository: ProductRepository | undefined;
+
 const createWindow = () => {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
     width: 800,
     height: 600,
+    minWidth: 960,
+    minHeight: 640,
+    title: 'Release Hub',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
     },
@@ -30,10 +38,38 @@ const createWindow = () => {
   mainWindow.webContents.openDevTools();
 };
 
+const getDatabasePath = (): string => {
+  if (app.isPackaged) {
+    return path.join(
+      app.getPath('userData'),
+      'data',
+      'release-hub.sqlite',
+    );
+  }
+
+  return path.join(
+    app.getAppPath(),
+    '.release-hub',
+    'data',
+    'release-hub.sqlite',
+  );
+};
+
+const registerProductIpcHandlers = (repository: ProductRepository) => {
+  ipcMain.handle('products:list', () => repository.list());
+  ipcMain.handle('products:create', (_event, input: CreateProductInput) =>
+    repository.create(input),
+  );
+};
+
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.on('ready', createWindow);
+app.on('ready', () => {
+  productRepository = new ProductRepository(getDatabasePath());
+  registerProductIpcHandlers(productRepository);
+  createWindow();
+});
 
 // Quit when all windows are closed, except on macOS. There, it's common
 // for applications and their menu bar to stay active until the user quits
@@ -50,6 +86,10 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
+});
+
+app.on('before-quit', () => {
+  productRepository?.close();
 });
 
 // In this file you can include the rest of your app's specific main process
