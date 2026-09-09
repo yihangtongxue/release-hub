@@ -69,6 +69,33 @@ export interface SelectedBuildFile {
   size: number;
 }
 
+export interface ReleaseProgress {
+  productId: string;
+  operation: 'publish' | 'verify';
+  message: string;
+}
+
+export interface PublicUpdate {
+  version: string;
+  tag: string;
+  assets: ReleaseAsset[];
+}
+
+export interface VerifyDownloadInput {
+  productId: string;
+  version: string;
+  platform: BuildPlatform;
+  architecture: string;
+  packageType: string;
+}
+
+export interface DownloadVerification {
+  version: string;
+  fileName: string;
+  size: number;
+  sha256: string;
+}
+
 export interface RepositoryInspection {
   state: 'ready' | 'needs-initialization';
   reason: 'managed' | 'empty' | 'missing-manifest' | 'invalid-manifest';

@@ -6,6 +6,7 @@ import {
   SettingOutlined,
 } from '@ant-design/icons';
 import {
+  Alert,
   Button,
   Card,
   ConfigProvider,
@@ -24,10 +25,14 @@ import {
   Typography,
 } from 'antd';
 import type { MenuProps, TableColumnsType } from 'antd';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { buildTargetOptions, stableVersion, targetKey, validatePublishInput } from './shared/release-validation';
 
 import type {
   AppSettings,
+  BuildPlatform,
+  PublicUpdate,
+  DownloadVerification,
   CreateProductInput,
   Product,
   ProductRelease,
@@ -39,7 +44,6 @@ import type {
 type PageKey = 'products' | 'settings' | 'versions';
 type ProductFormValues = CreateProductInput;
 type EditProductFormValues = Pick<UpdateProductInput, 'name' | 'description'>;
-type BuildPlatform = 'macos' | 'windows' | 'android';
 
 interface DraftAsset {
   id: number;
@@ -48,54 +52,6 @@ interface DraftAsset {
   packageType: string;
   file: SelectedBuildFile | null;
 }
-
-const buildTargetOptions: Record<
-  BuildPlatform,
-  {
-    label: string;
-    architectures: Array<{ value: string; label: string }>;
-    packageTypes: Array<{ value: string; label: string }>;
-  }
-> = {
-  macos: {
-    label: 'macOS',
-    architectures: [
-      { value: 'arm64', label: 'Apple Silicon（arm64）' },
-      { value: 'x64', label: 'Intel（x64）' },
-      { value: 'universal', label: '通用（universal）' },
-    ],
-    packageTypes: [
-      { value: 'dmg', label: 'DMG' },
-      { value: 'pkg', label: 'PKG' },
-      { value: 'zip', label: 'ZIP' },
-    ],
-  },
-  windows: {
-    label: 'Windows',
-    architectures: [
-      { value: 'x64', label: 'x64' },
-      { value: 'arm64', label: 'arm64' },
-    ],
-    packageTypes: [
-      { value: 'exe', label: 'EXE' },
-      { value: 'msi', label: 'MSI' },
-      { value: 'zip', label: 'ZIP' },
-    ],
-  },
-  android: {
-    label: 'Android',
-    architectures: [
-      { value: 'arm64-v8a', label: 'arm64-v8a' },
-      { value: 'armeabi-v7a', label: 'armeabi-v7a' },
-      { value: 'x86_64', label: 'x86_64' },
-      { value: 'universal', label: '通用 APK' },
-    ],
-    packageTypes: [
-      { value: 'apk', label: 'APK' },
-      { value: 'aab', label: 'AAB' },
-    ],
-  },
-};
 
 const createDraftAsset = (id: number): DraftAsset => ({
   id,
@@ -136,6 +92,20 @@ function App() {
   ]);
   const [releases, setReleases] = useState<ProductRelease[]>([]);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [publishProgress, setPublishProgress] = useState('');
+  const [publishError, setPublishError] = useState('');
+  const publishingRef = useRef(false);
+  const [isSelectingFile, setIsSelectingFile] = useState(false);
+  const [isLoadingReleases, setIsLoadingReleases] = useState(false);
+  const [releaseLoadError, setReleaseLoadError] = useState('');
+  const [isVerifyOpen, setIsVerifyOpen] = useState(false);
+  const [isVerifyingDownload, setIsVerifyingDownload] = useState(false);
+  const [isLoadingUpdate, setIsLoadingUpdate] = useState(false);
+  const [publicUpdate, setPublicUpdate] = useState<PublicUpdate | null>(null);
+  const [verifyTarget, setVerifyTarget] = useState('');
+  const [verifyProgress, setVerifyProgress] = useState('');
+  const [verifyError, setVerifyError] = useState('');
+  const [verification, setVerification] = useState<DownloadVerification | null>(null);
   const [isSavingBranch, setIsSavingBranch] = useState(false);
   const [verifyingProvider, setVerifyingProvider] =
     useState<RepositoryProvider | null>(null);
@@ -268,7 +238,60 @@ function App() {
   const openVersionManagement = (product: Product) => {
     setVersionProduct(product);
     setActivePage('versions');
-    void window.releaseHub.releases.list(product.id).then(setReleases);
+  };
+
+  useEffect(() => {
+    if (!versionProduct) return;
+    const productId = versionProduct.id;
+    let active = true;
+    setReleases([]);
+    setReleaseLoadError('');
+    setIsLoadingReleases(true);
+    void window.releaseHub.releases.list(productId)
+      .then((items) => { if (active) setReleases(items); })
+      .catch((error) => { if (active) setReleaseLoadError(readableErrorMessage(error, '读取历史失败')); })
+      .finally(() => { if (active) setIsLoadingReleases(false); });
+    const unsubscribe = window.releaseHub.releases.onProgress((event) => {
+      if (event.productId !== productId) return;
+      if (event.operation === 'publish') setPublishProgress(event.message);
+      else setVerifyProgress(event.message);
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [versionProduct?.id]);
+
+  const openDownloadVerification = async () => {
+    if (!versionProduct) return;
+    setIsVerifyOpen(true);
+    setPublicUpdate(null);
+    setVerification(null);
+    setVerifyError('');
+    setVerifyProgress('');
+    setIsLoadingUpdate(true);
+    try {
+      const update = await window.releaseHub.releases.getPublicUpdate(versionProduct.id);
+      setPublicUpdate(update);
+      setVerifyTarget(targetKey(update.assets[0]));
+    } catch (error) {
+      setVerifyError(readableErrorMessage(error, '读取公开更新清单失败'));
+    } finally { setIsLoadingUpdate(false); }
+  };
+
+  const verifyClientDownload = async () => {
+    if (!versionProduct || !publicUpdate || isVerifyingDownload) return;
+    const asset = publicUpdate.assets.find((item) => targetKey(item) === verifyTarget);
+    if (!asset) return;
+    setIsVerifyingDownload(true);
+    setVerifyError('');
+    setVerification(null);
+    setVerifyProgress('读取更新清单');
+    try {
+      const result = await window.releaseHub.releases.verifyDownload({
+        productId: versionProduct.id, version: publicUpdate.version,
+        platform: asset.platform, architecture: asset.architecture, packageType: asset.packageType,
+      });
+      setVerification(result);
+    } catch (error) { setVerifyError(readableErrorMessage(error, '下载校验失败')); }
+    finally { setIsVerifyingDownload(false); }
   };
 
   const returnToProducts = () => {
@@ -278,6 +301,8 @@ function App() {
   };
 
   const openPublishVersionModal = () => {
+    setPublishError('');
+    setPublishProgress('');
     setDraftAssets([createDraftAsset(Date.now())]);
     publishForm.resetFields();
     publishForm.setFieldsValue({ channel: 'stable' });
@@ -285,21 +310,52 @@ function App() {
   };
 
   const selectDraftFile = async (id: number) => {
-    const file = await window.releaseHub.releases.selectFile();
-    if (file) updateDraftAsset(id, { file });
+    setIsSelectingFile(true);
+    try {
+      const file = await window.releaseHub.releases.selectFile();
+      if (!file) return;
+      const extension = file.fileName.split('.').pop()?.toLowerCase();
+      const asset = draftAssets.find((item) => item.id === id);
+      if (!asset) return;
+      if (extension === 'apk') {
+        updateDraftAsset(id, { file, platform: 'android', architecture: asset.platform === 'android' ? asset.architecture : 'universal', packageType: 'apk' });
+      } else if (extension === 'dmg' || extension === 'pkg') {
+        updateDraftAsset(id, { file, platform: 'macos', architecture: asset.platform === 'macos' ? asset.architecture : 'arm64', packageType: extension });
+      } else if (extension === 'exe' || extension === 'msi') {
+        updateDraftAsset(id, { file, platform: 'windows', architecture: asset.platform === 'windows' ? asset.architecture : 'x64', packageType: extension });
+      } else {
+        updateDraftAsset(id, { file, ...(extension === 'zip' && asset.platform !== 'android' ? { packageType: 'zip' } : {}) });
+      }
+    } catch (error) { messageApi.error(readableErrorMessage(error, '文件选择失败')); }
+    finally { setIsSelectingFile(false); }
   };
 
   const publishVersion = async (values: { version: string; notes?: string; channel: 'stable' }) => {
-    if (!versionProduct || draftAssets.some((asset) => !asset.file)) { messageApi.warning('请为每个构建产物选择文件'); return; }
-    setIsPublishing(true);
+    if (publishingRef.current || isSelectingFile) return;
+    if (!versionProduct || draftAssets.some((asset) => !asset.file)) {
+      setPublishError('请为每个构建产物选择文件');
+      return;
+    }
+    setPublishError('');
     try {
-      const release = await window.releaseHub.releases.publish({ productId: versionProduct.id, version: values.version, notes: values.notes, channel: 'stable', assets: draftAssets.map((asset) => ({ filePath: asset.file!.filePath, fileName: asset.file!.fileName, platform: asset.platform, architecture: asset.architecture, packageType: asset.packageType })) });
+      const input = validatePublishInput({
+        productId: versionProduct.id, version: values.version, notes: values.notes, channel: 'stable',
+        assets: draftAssets.map((asset) => ({
+          filePath: asset.file!.filePath, fileName: asset.file!.fileName,
+          platform: asset.platform, architecture: asset.architecture, packageType: asset.packageType,
+        })),
+      });
+      publishingRef.current = true;
+      setIsPublishing(true);
+      setPublishProgress('校验发布信息');
+      const release = await window.releaseHub.releases.publish(input);
       setReleases((items) => [release, ...items]);
       setIsPublishVersionModalOpen(false);
-      await loadProducts();
-      messageApi.success(`版本 ${release.version} 已发布`);
-    } catch (error) { messageApi.error(`发布失败：${readableErrorMessage(error, '请稍后重试')}`); }
-    finally { setIsPublishing(false); }
+      setProducts((items) => items.map((product) => product.id === release.productId
+        ? { ...product, currentVersion: release.version } : product));
+      messageApi.success(`版本 ${release.version} 已发布，可使用“校验客户端下载”验证附件`);
+    } catch (error) { setPublishError(readableErrorMessage(error, '发布失败，请稍后重试')); }
+    finally { publishingRef.current = false; setIsPublishing(false); }
   };
 
   const updateDraftAsset = (
@@ -324,6 +380,7 @@ function App() {
   };
 
   const addDraftAsset = () => {
+    if (draftAssets.length >= 20) return;
     setDraftAssets((assets) => [
       ...assets,
       createDraftAsset(Date.now() + assets.length),
@@ -611,10 +668,16 @@ function App() {
           >
             发布新版本
           </Button>
+          <Button onClick={() => void openDownloadVerification()}>校验客户端下载</Button>
         </div>
 
+        <Typography.Paragraph type="secondary" className="release-history-hint">
+          历史记录保存在本机；删除产品或更换设备后不会自动恢复。
+        </Typography.Paragraph>
+        {releaseLoadError && <Alert type="error" showIcon title={releaseLoadError} />}
         <Table
           className="version-history-table"
+          loading={isLoadingReleases}
           rowKey="version"
           pagination={false}
           scroll={{
@@ -674,6 +737,7 @@ function App() {
         >
           <Menu
             mode="inline"
+            disabled={isPublishing || isVerifyingDownload || isSelectingFile}
             selectedKeys={[activePage === 'versions' ? 'products' : activePage]}
             items={menuItems}
             onClick={({ key }) => {
@@ -803,22 +867,31 @@ function App() {
         width={660}
         okText="发布版本"
         cancelText="取消"
-        onCancel={() => setIsPublishVersionModalOpen(false)}
+        onCancel={() => { if (!isPublishing && !isSelectingFile) setIsPublishVersionModalOpen(false); }}
+        closable={!isPublishing && !isSelectingFile}
+        keyboard={!isPublishing && !isSelectingFile}
+        cancelButtonProps={{ disabled: isPublishing || isSelectingFile }}
+        okButtonProps={{ disabled: isSelectingFile }}
         confirmLoading={isPublishing}
         onOk={() => publishForm.submit()}
         destroyOnHidden
       >
-        <Form form={publishForm} layout="vertical" requiredMark={false} onFinish={publishVersion}>
+        {isPublishing && <Alert className="release-feedback" type="info" showIcon title={publishProgress || '正在发布'} />}
+        {publishError && <Alert className="release-feedback" type="error" showIcon title="发布未完成" description={<span className="release-error-detail">{publishError}</span>} />}
+        <Form form={publishForm} disabled={isPublishing || isSelectingFile} layout="vertical" requiredMark={false} onFinish={publishVersion}>
           <div className="publish-version-basics">
             <Form.Item name="version"
               label="版本号"
-              rules={[{ required: true, message: '请输入版本号' }]}
+              rules={[{ validator: (_rule, value) => {
+                try { stableVersion(value); return Promise.resolve(); }
+                catch (error) { return Promise.reject(error); }
+              } }]}
               className="publish-version-number"
             >
               <Input placeholder="例如：1.2.0" />
             </Form.Item>
             <Form.Item name="channel" label="发布渠道" className="publish-version-channel">
-              <Select defaultValue="stable" options={[{ value: 'stable', label: '稳定版（stable）' }]} />
+              <Select options={[{ value: 'stable', label: '稳定版（stable）' }]} />
             </Form.Item>
           </div>
           <Form.Item name="notes" label="更新说明">
@@ -832,13 +905,14 @@ function App() {
             <div>
               <Typography.Text strong>构建产物</Typography.Text>
               <Typography.Text type="secondary" className="asset-section-hint">
-                每个文件都要标注目标平台、架构和包类型。
+                请确认平台、架构与后缀；文件名无法自动识别真实架构。Android 仅支持 APK。
               </Typography.Text>
             </div>
             <Button
               type="link"
               icon={<PlusOutlined />}
               onClick={addDraftAsset}
+              disabled={isPublishing || isSelectingFile || draftAssets.length >= 20}
             >
               添加构建产物
             </Button>
@@ -850,7 +924,7 @@ function App() {
 
               return (
               <div className="draft-asset" key={asset.id}>
-                <Button onClick={() => void selectDraftFile(asset.id)}>{asset.file?.fileName || '选择文件'}</Button>
+                <Button className="asset-file-button" title={asset.file ? `${asset.file.fileName}（${(asset.file.size / 1024 / 1024).toFixed(1)} MB）` : '选择文件'} onClick={() => void selectDraftFile(asset.id)}>{asset.file?.fileName || '选择文件'}</Button>
                 <Select
                   value={asset.platform}
                   options={(Object.keys(buildTargetOptions) as BuildPlatform[]).map(
@@ -895,6 +969,47 @@ function App() {
             })}
           </div>
         </Form>
+      </Modal>
+      <Modal
+        title="校验客户端下载"
+        open={isVerifyOpen}
+        centered
+        width={560}
+        okText={isVerifyingDownload ? '下载校验中' : '开始校验'}
+        cancelText="关闭"
+        confirmLoading={isVerifyingDownload}
+        okButtonProps={{ disabled: isLoadingUpdate || !publicUpdate }}
+        cancelButtonProps={{ disabled: isVerifyingDownload || isLoadingUpdate }}
+        closable={!isVerifyingDownload && !isLoadingUpdate}
+        keyboard={!isVerifyingDownload && !isLoadingUpdate}
+        onCancel={() => { if (!isVerifyingDownload && !isLoadingUpdate) setIsVerifyOpen(false); }}
+        onOk={() => void verifyClientDownload()}
+      >
+        <Typography.Paragraph type="secondary">
+          模拟客户端，不使用 Token 读取最新版和下载文件；校验后不保留安装包，不会安装。
+        </Typography.Paragraph>
+        {isLoadingUpdate && <Alert type="info" title="正在读取公开更新清单…" />}
+        {publicUpdate && (
+          <Form layout="vertical">
+            <Form.Item label={`最新稳定版：${publicUpdate.version} · 选择客户端目标`}>
+              <Select
+                style={{ width: '100%' }}
+                disabled={isVerifyingDownload}
+                value={verifyTarget}
+                options={publicUpdate.assets.map((asset) => ({ value: targetKey(asset), label: `${targetKey(asset)} · ${asset.fileName}` }))}
+                onChange={(value) => { setVerifyTarget(value); setVerification(null); setVerifyError(''); setVerifyProgress(''); }}
+              />
+            </Form.Item>
+          </Form>
+        )}
+        {isVerifyingDownload && <Alert type="info" showIcon title={verifyProgress} />}
+        {verifyError && <Alert type="error" showIcon title="校验未通过" description={verifyError} />}
+        {verification && <Alert type="success" showIcon title="下载与 SHA-256 校验通过" description={
+          <div className="release-error-detail">
+            <div>{verification.fileName} · {verification.size.toLocaleString()} 字节</div>
+            <div>SHA-256：{verification.sha256}</div>
+          </div>
+        } />}
       </Modal>
     </ConfigProvider>
   );

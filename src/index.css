@@ -200,12 +200,45 @@ body {
 
 .draft-asset {
   display: grid;
-  grid-template-columns: 112px 96px 220px 88px auto;
+  grid-template-columns: minmax(0, 1fr) 96px 220px 72px 40px;
   gap: 8px;
   align-items: center;
   padding: 10px;
   border: 1px solid #edf0f4;
   border-radius: 8px;
+}
+
+.draft-asset > * {
+  min-width: 0;
+}
+
+.draft-asset > .ant-btn {
+  padding-inline: 6px;
+}
+
+.asset-file-button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.publish-version-modal .ant-modal-body {
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+}
+
+.release-feedback {
+  margin-bottom: 16px;
+}
+
+.release-error-detail {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.release-history-hint {
+  margin-bottom: 12px;
+  font-size: 12px;
 }
 
 .create-product-modal .ant-modal-header {

@@ -3,6 +3,10 @@ import type {
   CreateProductInput,
   Product,
   ProductRelease,
+  PublicUpdate,
+  ReleaseProgress,
+  VerifyDownloadInput,
+  DownloadVerification,
   PublishReleaseInput,
   RepositoryInspection,
   RepositoryProvider,
@@ -36,6 +40,9 @@ declare global {
         list: (productId: string) => Promise<ProductRelease[]>;
         selectFile: () => Promise<import('./shared/product').SelectedBuildFile | null>;
         publish: (input: PublishReleaseInput) => Promise<ProductRelease>;
+        getPublicUpdate: (productId: string) => Promise<PublicUpdate>;
+        verifyDownload: (input: VerifyDownloadInput) => Promise<DownloadVerification>;
+        onProgress: (callback: (progress: ReleaseProgress) => void) => () => void;
       };
     };
   }

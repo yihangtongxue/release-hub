@@ -2,9 +2,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 import type {
   CreateProductInput,
-  ProductRelease,
   PublishReleaseInput,
-  RepositoryInspection,
+  ReleaseProgress,
+  VerifyDownloadInput,
   RepositoryProvider,
   UpdateProductInput,
 } from './shared/product';
@@ -33,5 +33,12 @@ contextBridge.exposeInMainWorld('releaseHub', {
     list: (productId: string) => ipcRenderer.invoke('releases:list', productId),
     selectFile: () => ipcRenderer.invoke('releases:select-file'),
     publish: (input: PublishReleaseInput) => ipcRenderer.invoke('releases:publish', input),
+    getPublicUpdate: (productId: string) => ipcRenderer.invoke('releases:public-update', productId),
+    verifyDownload: (input: VerifyDownloadInput) => ipcRenderer.invoke('releases:verify-download', input),
+    onProgress: (callback: (progress: ReleaseProgress) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, progress: ReleaseProgress) => callback(progress);
+      ipcRenderer.on('releases:progress', listener);
+      return () => ipcRenderer.removeListener('releases:progress', listener);
+    },
   },
 });

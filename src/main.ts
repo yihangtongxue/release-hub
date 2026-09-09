@@ -6,12 +6,14 @@ import started from 'electron-squirrel-startup';
 
 import { ProductRepository } from './database/product-repository';
 import { ReleaseHubRepositoryService } from './repository/release-hub-repository-service';
+import { compareVersions, validatePublishInput } from './shared/release-validation';
 import type {
   CreateProductInput,
   PublishReleaseInput,
   RepositoryProvider,
   UpdateProductInput,
   VerifiedConnection,
+  VerifyDownloadInput,
 } from './shared/product';
 
 const applicationId = 'com.yihang.releasehub';
@@ -27,6 +29,21 @@ if (process.platform === 'win32') {
 
 let productRepository: ProductRepository | undefined;
 const releaseHubRepositoryService = new ReleaseHubRepositoryService();
+const activeReleases = new Set<string>();
+const selectedFiles = new Map<number, Set<string>>();
+let showingBusyNotice = false;
+
+const showBusyNotice = () => {
+  if (showingBusyNotice) return;
+  showingBusyNotice = true;
+  void dialog.showMessageBox({
+    type: 'info',
+    title: '任务仍在进行',
+    message: '请等待发布或下载校验结束后再退出',
+    detail: '发布中途退出可能在远端留下未完成的 Release。',
+    buttons: ['继续等待'],
+  }).finally(() => { showingBusyNotice = false; });
+};
 
 const getDevelopmentIconPath = (): string =>
   path.join(app.getAppPath(), 'assets', 'icons', 'release-hub.png');
@@ -45,6 +62,13 @@ const createWindow = () => {
     },
   });
 
+  mainWindow.on('close', (event) => {
+    if (activeReleases.size) {
+      event.preventDefault();
+      showBusyNotice();
+    }
+  });
+
   // and load the index.html of the app.
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
@@ -54,8 +78,7 @@ const createWindow = () => {
     );
   }
 
-  // Open the DevTools.
-  mainWindow.webContents.openDevTools();
+  if (!app.isPackaged) mainWindow.webContents.openDevTools();
 };
 
 const getDatabasePath = (): string => {
@@ -80,21 +103,69 @@ const registerProductIpcHandlers = (repository: ProductRepository) => {
   ipcMain.handle('products:update', (_event, input: UpdateProductInput) =>
     repository.update(input),
   );
-  ipcMain.handle('products:delete', (_event, id: string) => repository.delete(id));
+  ipcMain.handle('products:delete', (_event, id: string) => {
+    if (activeReleases.has(id)) throw new Error('该产品正在发布或校验，请完成后再删除');
+    repository.delete(id);
+  });
   ipcMain.handle('releases:list', (_event, productId: string) => repository.listReleases(productId));
-  ipcMain.handle('releases:select-file', async () => {
+  ipcMain.handle('releases:select-file', async (event) => {
     const selection = await dialog.showOpenDialog({ properties: ['openFile'] });
     if (selection.canceled || !selection.filePaths[0]) return null;
     const filePath = selection.filePaths[0];
     const file = await stat(filePath);
+    if (!file.isFile() || !file.size) throw new Error('请选择非空的安装包文件');
+    if (!selectedFiles.has(event.sender.id)) {
+      const senderId = event.sender.id;
+      selectedFiles.set(senderId, new Set());
+      event.sender.once('destroyed', () => selectedFiles.delete(senderId));
+    }
+    selectedFiles.get(event.sender.id)?.add(filePath);
     return { filePath, fileName: path.basename(filePath), size: file.size };
   });
-  ipcMain.handle('releases:publish', async (_event, input: PublishReleaseInput) => {
-    const product = repository.getById(input.productId);
-    const token = getProviderToken(repository, product.repositoryProvider);
-    const release = await releaseHubRepositoryService.publish(product, input, token, repository.getSettings().defaultBranch);
-    repository.saveRelease(release);
-    return release;
+  ipcMain.handle('releases:publish', async (event, rawInput: PublishReleaseInput) => {
+    const input = validatePublishInput(rawInput);
+    if (activeReleases.has(input.productId)) throw new Error('该产品正在处理，请勿重复提交');
+    activeReleases.add(input.productId);
+    let token = '';
+    const progress = (message: string) => {
+      if (!event.sender.isDestroyed()) event.sender.send('releases:progress', { productId: input.productId, operation: 'publish', message });
+    };
+    try {
+      for (const asset of input.assets) {
+        if (!selectedFiles.get(event.sender.id)?.has(asset.filePath)) throw new Error('请通过选择文件按钮重新选择安装包');
+      }
+      const product = repository.getById(input.productId);
+      for (const release of repository.listReleases(product.id)) {
+        if (compareVersions(input.version, release.version) <= 0) throw new Error(`版本必须高于本地已发布版本 ${release.version}`);
+      }
+      if (product.currentVersion && compareVersions(input.version, product.currentVersion) <= 0) throw new Error(`版本必须高于当前版本 ${product.currentVersion}`);
+      token = getProviderToken(repository, product.repositoryProvider);
+      const release = await releaseHubRepositoryService.publish(product, input, token, repository.getSettings().defaultBranch, progress);
+      progress('保存本地版本历史');
+      try { repository.saveRelease(release); }
+      catch {
+        throw new Error(`远端版本 ${release.version}、附件和更新清单已发布成功，但本地历史保存失败。请检查磁盘空间并保留此提示，不要重复发布。远端地址：${product.repositoryUrl}/releases`);
+      }
+      progress('发布完成');
+      return release;
+    } catch (error) {
+      let detail = error instanceof Error ? error.message : '发布失败，请稍后重试';
+      if (token) detail = detail.split(token).join('[已隐藏]').split(encodeURIComponent(token)).join('[已隐藏]');
+      throw new Error(detail);
+    } finally { activeReleases.delete(input.productId); }
+  });
+  ipcMain.handle('releases:public-update', (_event, productId: string) =>
+    releaseHubRepositoryService.getPublicUpdate(repository.getById(productId), repository.getSettings().defaultBranch),
+  );
+  ipcMain.handle('releases:verify-download', async (event, input: VerifyDownloadInput) => {
+    if (!input || typeof input.productId !== 'string') throw new Error('请选择产品');
+    if (activeReleases.has(input.productId)) throw new Error('该产品正在处理，请稍后再校验');
+    activeReleases.add(input.productId);
+    try {
+      return await releaseHubRepositoryService.verifyDownload(repository.getById(input.productId), input, repository.getSettings().defaultBranch, (message) => {
+        if (!event.sender.isDestroyed()) event.sender.send('releases:progress', { productId: input.productId, operation: 'verify', message });
+      });
+    } finally { activeReleases.delete(input.productId); }
   });
   ipcMain.handle(
     'products:inspect-repository',
@@ -302,7 +373,12 @@ app.on('activate', () => {
   }
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (activeReleases.size) {
+    event.preventDefault();
+    showBusyNotice();
+    return;
+  }
   productRepository?.close();
 });
 
