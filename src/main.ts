@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
+import { stat } from 'node:fs/promises';
 import { Buffer } from 'node:buffer';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
@@ -7,6 +8,7 @@ import { ProductRepository } from './database/product-repository';
 import { ReleaseHubRepositoryService } from './repository/release-hub-repository-service';
 import type {
   CreateProductInput,
+  PublishReleaseInput,
   RepositoryProvider,
   UpdateProductInput,
   VerifiedConnection,
@@ -78,6 +80,22 @@ const registerProductIpcHandlers = (repository: ProductRepository) => {
   ipcMain.handle('products:update', (_event, input: UpdateProductInput) =>
     repository.update(input),
   );
+  ipcMain.handle('products:delete', (_event, id: string) => repository.delete(id));
+  ipcMain.handle('releases:list', (_event, productId: string) => repository.listReleases(productId));
+  ipcMain.handle('releases:select-file', async () => {
+    const selection = await dialog.showOpenDialog({ properties: ['openFile'] });
+    if (selection.canceled || !selection.filePaths[0]) return null;
+    const filePath = selection.filePaths[0];
+    const file = await stat(filePath);
+    return { filePath, fileName: path.basename(filePath), size: file.size };
+  });
+  ipcMain.handle('releases:publish', async (_event, input: PublishReleaseInput) => {
+    const product = repository.getById(input.productId);
+    const token = getProviderToken(repository, product.repositoryProvider);
+    const release = await releaseHubRepositoryService.publish(product, input, token, repository.getSettings().defaultBranch);
+    repository.saveRelease(release);
+    return release;
+  });
   ipcMain.handle(
     'products:inspect-repository',
     (_event, input: CreateProductInput) =>

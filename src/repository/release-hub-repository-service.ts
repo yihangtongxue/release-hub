@@ -1,7 +1,12 @@
 import { Buffer } from 'node:buffer';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
 
 import type {
   CreateProductInput,
+  Product,
+  ProductRelease,
+  PublishReleaseInput,
   RepositoryInspection,
   RepositoryProvider,
 } from '../shared/product';
@@ -68,6 +73,34 @@ const buildManifest = (product: CreateProductInput): string =>
   )}\n`;
 
 export class ReleaseHubRepositoryService {
+  async publish(
+    product: Product,
+    input: PublishReleaseInput,
+    token: string,
+    configuredDefaultBranch: string,
+  ): Promise<ProductRelease> {
+    const version = input.version.trim();
+    if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+      throw new Error('版本号应为 SemVer 格式，例如 1.2.0');
+    }
+    if (!input.assets.length) throw new Error('请至少添加一个构建产物');
+    const createInput: CreateProductInput = { name: product.name, description: product.description, repositoryProvider: product.repositoryProvider, repositoryUrl: product.repositoryUrl };
+    const inspection = await this.inspect(createInput, token, configuredDefaultBranch);
+    if (inspection.state !== 'ready') throw new Error('仓库尚未完成 ReleaseHub 初始化');
+    const reference = parseRepositoryReference(createInput);
+    const tag = `v${version}`;
+    const release = await this.createRelease(product.repositoryProvider, reference, tag, input.notes?.trim() || '', inspection.defaultBranch, token);
+    const assets = [] as ProductRelease['assets'];
+    for (const asset of input.assets) {
+      const metadata = await this.readAsset(asset.filePath, asset.fileName);
+      const downloadUrl = await this.uploadAsset(product.repositoryProvider, reference, release, metadata, token);
+      assets.push({ id: randomUUID(), fileName: metadata.fileName, platform: asset.platform, architecture: asset.architecture, packageType: asset.packageType, size: metadata.size, sha256: metadata.sha256, downloadUrl });
+    }
+    const result: ProductRelease = { id: randomUUID(), productId: product.id, version, notes: input.notes?.trim() || '', channel: 'stable', publishedAt: Date.now(), assets };
+    const existing = await this.getFile(product.repositoryProvider, reference, latestReleasePath, inspection.defaultBranch, token);
+    await this.putFile(product.repositoryProvider, reference, latestReleasePath, `${JSON.stringify({ version, tag, publishedAt: result.publishedAt, notes: result.notes, assets }, null, 2)}\n`, inspection.defaultBranch, existing?.sha, token, `chore: publish ${tag}`);
+    return result;
+  }
   async inspect(
     product: CreateProductInput,
     token: string,
@@ -229,9 +262,10 @@ export class ReleaseHubRepositoryService {
     branch: string,
     sha: string | undefined,
     token: string,
+    message = 'chore: initialize ReleaseHub management',
   ): Promise<void> {
     const body: Record<string, string> = {
-      message: 'chore: initialize ReleaseHub management',
+      message,
       content: Buffer.from(content).toString('base64'),
       branch,
     };
@@ -257,6 +291,41 @@ export class ReleaseHubRepositoryService {
         '初始化 ReleaseHub 管理文件失败',
       );
     }
+  }
+
+  private async readAsset(filePath: string, expectedName: string) {
+    const info = await stat(filePath);
+    if (!info.isFile()) throw new Error(`${expectedName} 不是有效文件`);
+    const content = await readFile(filePath);
+    return { fileName: expectedName, content, size: info.size, sha256: createHash('sha256').update(content).digest('hex') };
+  }
+
+  private async createRelease(provider: RepositoryProvider, reference: RepositoryReference, tag: string, notes: string, branch: string, token: string): Promise<{ id: number; uploadUrl?: string }> {
+    const response = await this.request(provider, `/repos/${encodeURIComponent(reference.owner)}/${encodeURIComponent(reference.name)}/releases`, token, { method: 'POST', body: JSON.stringify({ tag_name: tag, target_commitish: branch, name: tag, body: notes }) });
+    if (!response.ok) throw await this.remoteError(provider, response, '创建 Release 失败');
+    const body = await response.json() as { id?: unknown; upload_url?: unknown };
+    if (typeof body.id !== 'number') throw new Error('平台未返回 Release 标识');
+    return { id: body.id, uploadUrl: typeof body.upload_url === 'string' ? body.upload_url : undefined };
+  }
+
+  private async uploadAsset(provider: RepositoryProvider, reference: RepositoryReference, release: { id: number; uploadUrl?: string }, asset: { fileName: string; content: Buffer }, token: string): Promise<string> {
+    if (provider === 'github') {
+      const uploadUrl = release.uploadUrl?.replace('{?name,label}', `?name=${encodeURIComponent(asset.fileName)}`);
+      if (!uploadUrl) throw new Error('GitHub 未返回附件上传地址');
+      const response = await fetch(uploadUrl, { method: 'POST', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream', 'X-GitHub-Api-Version': '2022-11-28' }, body: asset.content, signal: AbortSignal.timeout(120_000) });
+      if (!response.ok) throw await this.remoteError(provider, response, `上传 ${asset.fileName} 失败`);
+      const body = await response.json() as { browser_download_url?: unknown };
+      if (typeof body.browser_download_url !== 'string') throw new Error('GitHub 未返回附件下载地址');
+      return body.browser_download_url;
+    }
+    const form = new FormData();
+    form.append('file', new Blob([asset.content]), asset.fileName);
+    const response = await fetch(`https://gitee.com/api/v5/repos/${encodeURIComponent(reference.owner)}/${encodeURIComponent(reference.name)}/releases/${release.id}/attach_files?access_token=${encodeURIComponent(token)}`, { method: 'POST', body: form, signal: AbortSignal.timeout(120_000) });
+    if (!response.ok) throw await this.remoteError(provider, response, `上传 ${asset.fileName} 失败`);
+    const body = await response.json() as { browser_download_url?: unknown; download_url?: unknown };
+    const downloadUrl = body.browser_download_url ?? body.download_url;
+    if (typeof downloadUrl !== 'string') throw new Error('Gitee 未返回附件下载地址');
+    return downloadUrl;
   }
 
   private async request(

@@ -114,6 +114,70 @@ body {
   font-size: 12px;
 }
 
+.version-page {
+  width: 100%;
+}
+
+.version-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.version-history-table {
+  overflow: hidden;
+  border: 1px solid #e9edf3;
+  border-radius: 12px;
+}
+
+.version-history-table .ant-empty {
+  margin-block: 64px;
+}
+
+.publish-version-basics {
+  display: flex;
+  gap: 16px;
+}
+
+.publish-version-number {
+  flex: 1;
+}
+
+.publish-version-channel {
+  width: 180px;
+}
+
+.asset-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 4px 0 10px;
+}
+
+.asset-section-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.draft-assets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.draft-asset {
+  display: grid;
+  grid-template-columns: 112px 96px 220px 88px auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid #edf0f4;
+  border-radius: 8px;
+}
+
 .create-product-modal .ant-modal-header {
   margin-bottom: 16px;
 }
@@ -164,10 +228,27 @@ body {
   .connection-cards {
     grid-template-columns: 1fr;
   }
+
+  .draft-asset {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 479px) {
   .app-content {
     padding: 20px 16px;
+  }
+
+  .publish-version-basics {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .publish-version-channel {
+    width: auto;
+  }
+
+  .draft-asset {
+    grid-template-columns: 1fr;
   }
 }

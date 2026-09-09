@@ -7,6 +7,7 @@ import type {
   AppSettings,
   CreateProductInput,
   Product,
+  ProductRelease,
   ProviderConnection,
   RepositoryProvider,
   UpdateProductInput,
@@ -88,6 +89,32 @@ const migrations = [
     name: '记录已同步的当前版本',
     sql: `
       ALTER TABLE products ADD COLUMN current_version TEXT;
+    `,
+  },
+  {
+    version: 4,
+    name: '记录发布版本与构建产物',
+    sql: `
+      CREATE TABLE releases (
+        id TEXT PRIMARY KEY NOT NULL,
+        product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        version TEXT NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        channel TEXT NOT NULL DEFAULT 'stable',
+        published_at INTEGER NOT NULL,
+        UNIQUE(product_id, version, channel)
+      );
+      CREATE TABLE release_assets (
+        id TEXT PRIMARY KEY NOT NULL,
+        release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+        file_name TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        architecture TEXT NOT NULL,
+        package_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        download_url TEXT NOT NULL
+      );
     `,
   },
 ];
@@ -212,6 +239,64 @@ export class ProductRepository {
       WHERE id = ?
     `);
     return productStatement.get(id) as unknown as Product;
+  }
+
+  delete(id: string): void {
+    const productId = id?.trim();
+    if (!productId) {
+      throw new Error('产品标识不正确');
+    }
+
+    const result = this.database.prepare('DELETE FROM products WHERE id = ?').run(productId);
+    if (Number(result.changes) === 0) {
+      throw new Error('产品不存在或已被删除');
+    }
+  }
+
+  getById(id: string): Product {
+    const statement = this.database.prepare(`
+      SELECT id, name, description, repository_provider AS repositoryProvider,
+        repository_url AS repositoryUrl, current_version AS currentVersion,
+        created_at AS createdAt, updated_at AS updatedAt
+      FROM products WHERE id = ?
+    `);
+    const product = statement.get(id) as unknown as Product | undefined;
+    if (!product) throw new Error('产品不存在或已被删除');
+    return product;
+  }
+
+  listReleases(productId: string): ProductRelease[] {
+    const releases = this.database.prepare(`
+      SELECT id, product_id AS productId, version, notes, channel, published_at AS publishedAt
+      FROM releases WHERE product_id = ? ORDER BY published_at DESC
+    `).all(productId) as unknown as ProductRelease[];
+    const assets = this.database.prepare(`
+      SELECT id, file_name AS fileName, platform, architecture,
+        package_type AS packageType, size, sha256, download_url AS downloadUrl
+      FROM release_assets WHERE release_id = ?
+    `);
+    return releases.map((release) => ({ ...release, assets: assets.all(release.id) as unknown as ProductRelease['assets'] }));
+  }
+
+  saveRelease(release: ProductRelease): void {
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      this.database.prepare(`INSERT INTO releases (id, product_id, version, notes, channel, published_at)
+        VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(release.id, release.productId, release.version, release.notes, release.channel, release.publishedAt);
+      const assetStatement = this.database.prepare(`INSERT INTO release_assets
+        (id, release_id, file_name, platform, architecture, package_type, size, sha256, download_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const asset of release.assets) {
+        assetStatement.run(asset.id, release.id, asset.fileName, asset.platform, asset.architecture, asset.packageType, asset.size, asset.sha256, asset.downloadUrl);
+      }
+      this.database.prepare('UPDATE products SET current_version = ?, updated_at = ? WHERE id = ?')
+        .run(release.version, Date.now(), release.productId);
+      this.database.exec('COMMIT');
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   getSettings(): AppSettings {

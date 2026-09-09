@@ -24,6 +24,51 @@ export interface UpdateProductInput {
   description?: string;
 }
 
+export type BuildPlatform = 'macos' | 'windows' | 'android';
+
+export interface BuildAssetInput {
+  filePath: string;
+  fileName: string;
+  platform: BuildPlatform;
+  architecture: string;
+  packageType: string;
+}
+
+export interface PublishReleaseInput {
+  productId: string;
+  version: string;
+  notes?: string;
+  channel: 'stable';
+  assets: BuildAssetInput[];
+}
+
+export interface ReleaseAsset {
+  id: string;
+  fileName: string;
+  platform: BuildPlatform;
+  architecture: string;
+  packageType: string;
+  size: number;
+  sha256: string;
+  downloadUrl: string;
+}
+
+export interface ProductRelease {
+  id: string;
+  productId: string;
+  version: string;
+  notes: string;
+  channel: 'stable';
+  publishedAt: number;
+  assets: ReleaseAsset[];
+}
+
+export interface SelectedBuildFile {
+  filePath: string;
+  fileName: string;
+  size: number;
+}
+
 export interface RepositoryInspection {
   state: 'ready' | 'needs-initialization';
   reason: 'managed' | 'empty' | 'missing-manifest' | 'invalid-manifest';

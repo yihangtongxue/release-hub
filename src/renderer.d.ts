@@ -2,6 +2,8 @@ import type {
   AppSettings,
   CreateProductInput,
   Product,
+  ProductRelease,
+  PublishReleaseInput,
   RepositoryInspection,
   RepositoryProvider,
   UpdateProductInput,
@@ -13,6 +15,7 @@ declare global {
       products: {
         list: () => Promise<Product[]>;
         update: (input: UpdateProductInput) => Promise<Product>;
+        delete: (id: string) => Promise<void>;
         create: (input: CreateProductInput) => Promise<Product>;
         inspectRepository: (
           input: CreateProductInput,
@@ -28,6 +31,11 @@ declare global {
           provider: RepositoryProvider,
           token: string,
         ) => Promise<AppSettings>;
+      };
+      releases: {
+        list: (productId: string) => Promise<ProductRelease[]>;
+        selectFile: () => Promise<import('./shared/product').SelectedBuildFile | null>;
+        publish: (input: PublishReleaseInput) => Promise<ProductRelease>;
       };
     };
   }

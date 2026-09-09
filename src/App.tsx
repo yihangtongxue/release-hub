@@ -1,5 +1,7 @@
 import {
   AppstoreOutlined,
+  ArrowLeftOutlined,
+  CloudUploadOutlined,
   PlusOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
@@ -15,6 +17,7 @@ import {
   message,
   Modal,
   Radio,
+  Select,
   Space,
   Table,
   Tag,
@@ -27,13 +30,80 @@ import type {
   AppSettings,
   CreateProductInput,
   Product,
+  ProductRelease,
   RepositoryProvider,
+  SelectedBuildFile,
   UpdateProductInput,
 } from './shared/product';
 
-type PageKey = 'products' | 'settings';
+type PageKey = 'products' | 'settings' | 'versions';
 type ProductFormValues = CreateProductInput;
 type EditProductFormValues = Pick<UpdateProductInput, 'name' | 'description'>;
+type BuildPlatform = 'macos' | 'windows' | 'android';
+
+interface DraftAsset {
+  id: number;
+  platform: BuildPlatform;
+  architecture: string;
+  packageType: string;
+  file: SelectedBuildFile | null;
+}
+
+const buildTargetOptions: Record<
+  BuildPlatform,
+  {
+    label: string;
+    architectures: Array<{ value: string; label: string }>;
+    packageTypes: Array<{ value: string; label: string }>;
+  }
+> = {
+  macos: {
+    label: 'macOS',
+    architectures: [
+      { value: 'arm64', label: 'Apple Silicon（arm64）' },
+      { value: 'x64', label: 'Intel（x64）' },
+      { value: 'universal', label: '通用（universal）' },
+    ],
+    packageTypes: [
+      { value: 'dmg', label: 'DMG' },
+      { value: 'pkg', label: 'PKG' },
+      { value: 'zip', label: 'ZIP' },
+    ],
+  },
+  windows: {
+    label: 'Windows',
+    architectures: [
+      { value: 'x64', label: 'x64' },
+      { value: 'arm64', label: 'arm64' },
+    ],
+    packageTypes: [
+      { value: 'exe', label: 'EXE' },
+      { value: 'msi', label: 'MSI' },
+      { value: 'zip', label: 'ZIP' },
+    ],
+  },
+  android: {
+    label: 'Android',
+    architectures: [
+      { value: 'arm64-v8a', label: 'arm64-v8a' },
+      { value: 'armeabi-v7a', label: 'armeabi-v7a' },
+      { value: 'x86_64', label: 'x86_64' },
+      { value: 'universal', label: '通用 APK' },
+    ],
+    packageTypes: [
+      { value: 'apk', label: 'APK' },
+      { value: 'aab', label: 'AAB' },
+    ],
+  },
+};
+
+const createDraftAsset = (id: number): DraftAsset => ({
+  id,
+  platform: 'macos',
+  architecture: 'arm64',
+  packageType: 'dmg',
+  file: null,
+});
 
 const readableErrorMessage = (error: unknown, fallback: string): string => {
   if (!(error instanceof Error)) {
@@ -58,6 +128,14 @@ function App() {
   const [isSavingProduct, setIsSavingProduct] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [versionProduct, setVersionProduct] = useState<Product | null>(null);
+  const [isPublishVersionModalOpen, setIsPublishVersionModalOpen] =
+    useState(false);
+  const [draftAssets, setDraftAssets] = useState<DraftAsset[]>([
+    createDraftAsset(1),
+  ]);
+  const [releases, setReleases] = useState<ProductRelease[]>([]);
+  const [isPublishing, setIsPublishing] = useState(false);
   const [isSavingBranch, setIsSavingBranch] = useState(false);
   const [verifyingProvider, setVerifyingProvider] =
     useState<RepositoryProvider | null>(null);
@@ -67,6 +145,7 @@ function App() {
   >({});
   const [form] = Form.useForm<ProductFormValues>();
   const [editForm] = Form.useForm<EditProductFormValues>();
+  const [publishForm] = Form.useForm<{ version: string; notes?: string; channel: 'stable' }>();
   const [settingsForm] = Form.useForm<{ defaultBranch: string }>();
   const [messageApi, messageContextHolder] = message.useMessage();
 
@@ -173,6 +252,71 @@ function App() {
     editForm.resetFields();
   };
 
+  const openVersionManagement = (product: Product) => {
+    setVersionProduct(product);
+    setActivePage('versions');
+    void window.releaseHub.releases.list(product.id).then(setReleases);
+  };
+
+  const returnToProducts = () => {
+    setActivePage('products');
+    setVersionProduct(null);
+    setIsPublishVersionModalOpen(false);
+  };
+
+  const openPublishVersionModal = () => {
+    setDraftAssets([createDraftAsset(Date.now())]);
+    publishForm.resetFields();
+    publishForm.setFieldsValue({ channel: 'stable' });
+    setIsPublishVersionModalOpen(true);
+  };
+
+  const selectDraftFile = async (id: number) => {
+    const file = await window.releaseHub.releases.selectFile();
+    if (file) updateDraftAsset(id, { file });
+  };
+
+  const publishVersion = async (values: { version: string; notes?: string; channel: 'stable' }) => {
+    if (!versionProduct || draftAssets.some((asset) => !asset.file)) { messageApi.warning('请为每个构建产物选择文件'); return; }
+    setIsPublishing(true);
+    try {
+      const release = await window.releaseHub.releases.publish({ productId: versionProduct.id, version: values.version, notes: values.notes, channel: 'stable', assets: draftAssets.map((asset) => ({ filePath: asset.file!.filePath, fileName: asset.file!.fileName, platform: asset.platform, architecture: asset.architecture, packageType: asset.packageType })) });
+      setReleases((items) => [release, ...items]);
+      setIsPublishVersionModalOpen(false);
+      await loadProducts();
+      messageApi.success(`版本 ${release.version} 已发布`);
+    } catch (error) { messageApi.error(`发布失败：${readableErrorMessage(error, '请稍后重试')}`); }
+    finally { setIsPublishing(false); }
+  };
+
+  const updateDraftAsset = (
+    id: number,
+    changes: Partial<Omit<DraftAsset, 'id'>>,
+  ) => {
+    setDraftAssets((assets) =>
+      assets.map((asset) => ({
+        ...asset,
+        ...(asset.id === id ? changes : {}),
+      })),
+    );
+  };
+
+  const changeDraftAssetPlatform = (id: number, platform: BuildPlatform) => {
+    const target = buildTargetOptions[platform];
+    updateDraftAsset(id, {
+      platform,
+      architecture: target.architectures[0].value,
+      packageType: target.packageTypes[0].value,
+    });
+  };
+
+  const addDraftAsset = () => {
+    setDraftAssets((assets) => [
+      ...assets,
+      createDraftAsset(Date.now() + assets.length),
+    ]);
+  };
+
   const createProduct = async (values: ProductFormValues) => {
     setIsSavingProduct(true);
 
@@ -247,6 +391,29 @@ function App() {
     }
   };
 
+  const deleteProduct = (product: Product) => {
+    Modal.confirm({
+      title: '删除产品',
+      content: (
+        <Typography.Paragraph style={{ marginBottom: 0 }}>
+          确定删除“{product.name}”吗？这会删除本地产品和版本历史，不会删除远端仓库或已发布的 Release。
+        </Typography.Paragraph>
+      ),
+      okText: '删除产品',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await window.releaseHub.products.delete(product.id);
+          await loadProducts();
+          messageApi.success('产品已删除');
+        } catch (error) {
+          messageApi.error(`删除产品失败：${readableErrorMessage(error, '请稍后重试')}`);
+        }
+      },
+    });
+  };
+
   const productColumns: TableColumnsType<Product> = [
     {
       title: '产品名称',
@@ -273,13 +440,18 @@ function App() {
     {
       title: '操作',
       key: 'actions',
-      width: 150,
+      width: 200,
       render: (_value, product) => (
         <Space size={0} className="product-actions">
           <Button type="link" onClick={() => openEditProductModal(product)}>
             编辑
           </Button>
-          <Button type="link">版本管理</Button>
+          <Button type="link" onClick={() => openVersionManagement(product)}>
+            版本管理
+          </Button>
+          <Button type="link" danger onClick={() => deleteProduct(product)}>
+            删除
+          </Button>
         </Space>
       ),
     },
@@ -398,6 +570,57 @@ function App() {
     );
   };
 
+  const renderVersionsPage = () => {
+    if (!versionProduct) {
+      return null;
+    }
+
+    return (
+      <div className="version-page">
+        <div className="version-page-actions">
+          <Button icon={<ArrowLeftOutlined />} onClick={returnToProducts}>
+            返回产品
+          </Button>
+          <Button
+            type="primary"
+            icon={<CloudUploadOutlined />}
+            onClick={openPublishVersionModal}
+          >
+            发布新版本
+          </Button>
+        </div>
+
+        <Table
+          className="version-history-table"
+          rowKey="version"
+          pagination={false}
+          scroll={{
+            y: 'max(280px, min(400px, calc(100vh - 280px)))',
+          }}
+          columns={[
+            { title: '版本号', dataIndex: 'version', key: 'version', width: 140 },
+            { title: '构建产物', dataIndex: 'assets', key: 'assets', render: (assets: ProductRelease['assets']) => assets.map((asset) => `${asset.platform}/${asset.architecture}/${asset.packageType}`).join('，') },
+            { title: '更新说明', dataIndex: 'notes', key: 'notes', width: 260 },
+            { title: '发布时间', dataIndex: 'publishedAt', key: 'publishedAt', width: 180, render: (value: number) => new Date(value).toLocaleString() },
+          ]}
+          dataSource={releases}
+          locale={{
+            emptyText: (
+              <Empty
+                description="还没有发布版本"
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              >
+                <Button type="primary" onClick={openPublishVersionModal}>
+                  发布第一个版本
+                </Button>
+              </Empty>
+            ),
+          }}
+        />
+      </div>
+    );
+  };
+
   return (
     <ConfigProvider
       theme={{
@@ -428,16 +651,21 @@ function App() {
         >
           <Menu
             mode="inline"
-            selectedKeys={[activePage]}
+            selectedKeys={[activePage === 'versions' ? 'products' : activePage]}
             items={menuItems}
-            onClick={({ key }) => setActivePage(key as PageKey)}
+            onClick={({ key }) => {
+              setActivePage(key as PageKey);
+              if (key === 'products') {
+                setVersionProduct(null);
+              }
+            }}
           />
         </Layout.Sider>
 
         <Layout.Content className="app-content">
-          {activePage === 'products'
-            ? renderProductsPage()
-            : renderSettingsPage()}
+          {activePage === 'products' && renderProductsPage()}
+          {activePage === 'settings' && renderSettingsPage()}
+          {activePage === 'versions' && renderVersionsPage()}
         </Layout.Content>
       </Layout>
 
@@ -541,6 +769,108 @@ function App() {
           <Form.Item label="仓库地址">
             <Input value={editingProduct?.repositoryUrl} disabled />
           </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        className="publish-version-modal"
+        title="发布新版本"
+        open={isPublishVersionModalOpen}
+        centered
+        width={660}
+        okText="发布版本"
+        cancelText="取消"
+        onCancel={() => setIsPublishVersionModalOpen(false)}
+        confirmLoading={isPublishing}
+        onOk={() => publishForm.submit()}
+        destroyOnHidden
+      >
+        <Form form={publishForm} layout="vertical" requiredMark={false} onFinish={publishVersion}>
+          <div className="publish-version-basics">
+            <Form.Item name="version"
+              label="版本号"
+              rules={[{ required: true, message: '请输入版本号' }]}
+              className="publish-version-number"
+            >
+              <Input placeholder="例如：1.2.0" />
+            </Form.Item>
+            <Form.Item name="channel" label="发布渠道" className="publish-version-channel">
+              <Select defaultValue="stable" options={[{ value: 'stable', label: '稳定版（stable）' }]} />
+            </Form.Item>
+          </div>
+          <Form.Item name="notes" label="更新说明">
+            <Input.TextArea
+              placeholder="说明本次版本的新增功能、修复内容或注意事项"
+              autoSize={{ minRows: 3, maxRows: 5 }}
+            />
+          </Form.Item>
+
+          <div className="asset-section-header">
+            <div>
+              <Typography.Text strong>构建产物</Typography.Text>
+              <Typography.Text type="secondary" className="asset-section-hint">
+                每个文件都要标注目标平台、架构和包类型。
+              </Typography.Text>
+            </div>
+            <Button
+              type="link"
+              icon={<PlusOutlined />}
+              onClick={addDraftAsset}
+            >
+              添加构建产物
+            </Button>
+          </div>
+
+          <div className="draft-assets">
+            {draftAssets.map((asset) => {
+              const target = buildTargetOptions[asset.platform];
+
+              return (
+              <div className="draft-asset" key={asset.id}>
+                <Button onClick={() => void selectDraftFile(asset.id)}>{asset.file?.fileName || '选择文件'}</Button>
+                <Select
+                  value={asset.platform}
+                  options={(Object.keys(buildTargetOptions) as BuildPlatform[]).map(
+                    (platform) => ({
+                      value: platform,
+                      label: buildTargetOptions[platform].label,
+                    }),
+                  )}
+                  onChange={(platform: BuildPlatform) =>
+                    changeDraftAssetPlatform(asset.id, platform)
+                  }
+                />
+                <Select
+                  value={asset.architecture}
+                  options={target.architectures}
+                  onChange={(architecture: string) =>
+                    updateDraftAsset(asset.id, { architecture })
+                  }
+                />
+                <Select
+                  value={asset.packageType}
+                  options={target.packageTypes}
+                  onChange={(packageType: string) =>
+                    updateDraftAsset(asset.id, { packageType })
+                  }
+                />
+                {draftAssets.length > 1 && (
+                  <Button
+                    type="text"
+                    danger
+                    onClick={() =>
+                      setDraftAssets((assets) =>
+                        assets.filter((item) => item.id !== asset.id),
+                      )
+                    }
+                  >
+                    删除
+                  </Button>
+                )}
+              </div>
+              );
+            })}
+          </div>
         </Form>
       </Modal>
     </ConfigProvider>
