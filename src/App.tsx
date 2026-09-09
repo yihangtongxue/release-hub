@@ -28,42 +28,27 @@ import type {
   CreateProductInput,
   Product,
   RepositoryProvider,
+  UpdateProductInput,
 } from './shared/product';
 
 type PageKey = 'products' | 'settings';
 type ProductFormValues = CreateProductInput;
+type EditProductFormValues = Pick<UpdateProductInput, 'name' | 'description'>;
+
+const readableErrorMessage = (error: unknown, fallback: string): string => {
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+
+  return error.message.replace(
+    /^Error invoking remote method '[^']+': Error: /,
+    '',
+  );
+};
 
 const menuItems: MenuProps['items'] = [
   { key: 'products', icon: <AppstoreOutlined />, label: '产品' },
   { key: 'settings', icon: <SettingOutlined />, label: '设置' },
-];
-
-const productColumns: TableColumnsType<Product> = [
-  { title: '产品名称', dataIndex: 'name', key: 'name', width: 220 },
-  {
-    title: '产品描述',
-    dataIndex: 'description',
-    key: 'description',
-    render: (description: string) => description || '—',
-  },
-  {
-    title: '当前版本',
-    dataIndex: 'currentVersion',
-    key: 'currentVersion',
-    width: 160,
-    render: (version: string | null) => version || '暂无版本',
-  },
-  {
-    title: '操作',
-    key: 'actions',
-    width: 180,
-    render: () => (
-      <>
-        <Button type="link">编辑</Button>
-        <Button type="link">版本管理</Button>
-      </>
-    ),
-  },
 ];
 
 function App() {
@@ -71,6 +56,8 @@ function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isSavingProduct, setIsSavingProduct] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isSavingBranch, setIsSavingBranch] = useState(false);
   const [verifyingProvider, setVerifyingProvider] =
     useState<RepositoryProvider | null>(null);
@@ -79,6 +66,7 @@ function App() {
     Partial<Record<RepositoryProvider, string>>
   >({});
   const [form] = Form.useForm<ProductFormValues>();
+  const [editForm] = Form.useForm<EditProductFormValues>();
   const [settingsForm] = Form.useForm<{ defaultBranch: string }>();
   const [messageApi, messageContextHolder] = message.useMessage();
 
@@ -87,8 +75,7 @@ function App() {
       const savedProducts = await window.releaseHub.products.list();
       setProducts(savedProducts);
     } catch (error) {
-      const description =
-        error instanceof Error ? error.message : '请稍后重试';
+      const description = readableErrorMessage(error, '请稍后重试');
       messageApi.error(`读取产品失败：${description}`);
     }
   };
@@ -101,8 +88,7 @@ function App() {
         defaultBranch: savedSettings.defaultBranch,
       });
     } catch (error) {
-      const description =
-        error instanceof Error ? error.message : '请稍后重试';
+      const description = readableErrorMessage(error, '请稍后重试');
       messageApi.error(`读取设置失败：${description}`);
     }
   };
@@ -139,8 +125,7 @@ function App() {
       setSettings(savedSettings);
       messageApi.success('默认分支已保存');
     } catch (error) {
-      const description =
-        error instanceof Error ? error.message : '请检查分支名称后重试';
+      const description = readableErrorMessage(error, '请检查分支名称后重试');
       messageApi.error(`保存默认分支失败：${description}`);
     } finally {
       setIsSavingBranch(false);
@@ -164,8 +149,7 @@ function App() {
       setTokens((currentTokens) => ({ ...currentTokens, [provider]: '' }));
       messageApi.success(`${provider === 'github' ? 'GitHub' : 'Gitee'} Token 验证成功`);
     } catch (error) {
-      const description =
-        error instanceof Error ? error.message : '请稍后重试';
+      const description = readableErrorMessage(error, '请稍后重试');
       messageApi.error(`Token 验证失败：${description}`);
     } finally {
       setVerifyingProvider(null);
@@ -176,22 +160,130 @@ function App() {
     setIsCreateModalOpen(false);
   };
 
+  const openEditProductModal = (product: Product) => {
+    setEditingProduct(product);
+    editForm.setFieldsValue({
+      name: product.name,
+      description: product.description,
+    });
+  };
+
+  const closeEditProductModal = () => {
+    setEditingProduct(null);
+    editForm.resetFields();
+  };
+
   const createProduct = async (values: ProductFormValues) => {
     setIsSavingProduct(true);
 
     try {
-      await window.releaseHub.products.create(values);
+      const inspection = await window.releaseHub.products.inspectRepository(values);
+
+      if (inspection.state === 'needs-initialization') {
+        setIsSavingProduct(false);
+        const confirmed = await new Promise<boolean>((resolve) => {
+          Modal.confirm({
+            title: '初始化 ReleaseHub 管理文件',
+            content: (
+              <Space direction="vertical" size={8}>
+                <Typography.Paragraph style={{ marginBottom: 0 }}>
+                  {inspection.message}
+                </Typography.Paragraph>
+                <Typography.Text type="secondary">
+                  确认后仅会创建或覆盖仓库中的
+                  {' '}
+                  <Typography.Text code>.release-hub/manifest.json</Typography.Text>
+                  ，不会修改业务代码或其他文件。
+                </Typography.Text>
+              </Space>
+            ),
+            okText: '确认初始化并创建',
+            cancelText: '取消创建',
+            okButtonProps: { danger: inspection.reason === 'invalid-manifest' },
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
+        });
+
+        if (!confirmed) {
+          return;
+        }
+
+        setIsSavingProduct(true);
+        await window.releaseHub.products.createWithInitialization(values);
+      } else {
+        await window.releaseHub.products.create(values);
+      }
       await loadProducts();
       setIsCreateModalOpen(false);
       messageApi.success('产品已创建');
     } catch (error) {
-      const description =
-        error instanceof Error ? error.message : '请检查填写的信息后重试';
+      const description = readableErrorMessage(error, '请检查填写的信息后重试');
       messageApi.error(`创建产品失败：${description}`);
     } finally {
       setIsSavingProduct(false);
     }
   };
+
+  const updateProduct = async (values: EditProductFormValues) => {
+    if (!editingProduct) {
+      return;
+    }
+
+    setIsSavingEdit(true);
+    try {
+      await window.releaseHub.products.update({
+        id: editingProduct.id,
+        ...values,
+      });
+      await loadProducts();
+      closeEditProductModal();
+      messageApi.success('产品信息已保存');
+    } catch (error) {
+      const description = readableErrorMessage(error, '请检查填写的信息后重试');
+      messageApi.error(`保存产品失败：${description}`);
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  const productColumns: TableColumnsType<Product> = [
+    {
+      title: '产品名称',
+      dataIndex: 'name',
+      key: 'name',
+      width: 140,
+      ellipsis: true,
+    },
+    {
+      title: '产品描述',
+      dataIndex: 'description',
+      key: 'description',
+      width: 160,
+      ellipsis: true,
+      render: (description: string) => description || '—',
+    },
+    {
+      title: '当前版本',
+      dataIndex: 'currentVersion',
+      key: 'currentVersion',
+      width: 120,
+      render: (version: string | null) => version || '暂无版本',
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 150,
+      render: (_value, product) => (
+        <Space size={0} className="product-actions">
+          <Button type="link" onClick={() => openEditProductModal(product)}>
+            编辑
+          </Button>
+          <Button type="link">版本管理</Button>
+        </Space>
+      ),
+    },
+  ];
 
   const renderProductsPage = () => (
     <>
@@ -218,7 +310,6 @@ function App() {
         rowKey="id"
         pagination={false}
         scroll={{
-          x: 720,
           y: 'max(280px, min(400px, calc(100vh - 280px)))',
         }}
         locale={{
@@ -405,6 +496,50 @@ function App() {
             rules={[{ required: true, message: '请输入仓库地址' }]}
           >
             <Input placeholder="例如：https://github.com/owner/repository" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        className="create-product-modal"
+        title="编辑产品"
+        open={Boolean(editingProduct)}
+        centered
+        width={460}
+        okText="保存更改"
+        cancelText="取消"
+        confirmLoading={isSavingEdit}
+        onCancel={closeEditProductModal}
+        onOk={() => editForm.submit()}
+        destroyOnHidden
+      >
+        <Form<EditProductFormValues>
+          form={editForm}
+          layout="vertical"
+          requiredMark={false}
+          onFinish={updateProduct}
+        >
+          <Form.Item
+            label="产品名称"
+            name="name"
+            rules={[{ required: true, message: '请输入产品名称' }]}
+          >
+            <Input autoFocus />
+          </Form.Item>
+
+          <Form.Item label="产品描述" name="description">
+            <Input.TextArea autoSize={{ minRows: 3, maxRows: 5 }} />
+          </Form.Item>
+
+          <Form.Item label="代码托管平台">
+            <Input
+              value={editingProduct?.repositoryProvider === 'github' ? 'GitHub' : 'Gitee'}
+              disabled
+            />
+          </Form.Item>
+
+          <Form.Item label="仓库地址">
+            <Input value={editingProduct?.repositoryUrl} disabled />
           </Form.Item>
         </Form>
       </Modal>

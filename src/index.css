@@ -76,6 +76,10 @@ body {
   margin-block: 56px;
 }
 
+.product-actions {
+  white-space: nowrap;
+}
+
 .settings-placeholder {
   padding-top: 4px;
 }

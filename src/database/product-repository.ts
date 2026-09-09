@@ -9,6 +9,7 @@ import type {
   Product,
   ProviderConnection,
   RepositoryProvider,
+  UpdateProductInput,
   VerifiedConnection,
 } from '../shared/product';
 
@@ -18,6 +19,7 @@ interface ProductRow {
   description: string;
   repositoryProvider: RepositoryProvider;
   repositoryUrl: string;
+  currentVersion: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -34,6 +36,10 @@ interface ConnectionRow {
   provider: RepositoryProvider;
   accountLogin: string;
   verifiedAt: number;
+}
+
+interface TokenRow {
+  encryptedToken: Uint8Array;
 }
 
 const migrations = [
@@ -77,6 +83,13 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 3,
+    name: '记录已同步的当前版本',
+    sql: `
+      ALTER TABLE products ADD COLUMN current_version TEXT;
+    `,
+  },
 ];
 
 export class ProductRepository {
@@ -101,6 +114,7 @@ export class ProductRepository {
         description,
         repository_provider AS repositoryProvider,
         repository_url AS repositoryUrl,
+        current_version AS currentVersion,
         created_at AS createdAt,
         updated_at AS updatedAt
       FROM products
@@ -110,11 +124,10 @@ export class ProductRepository {
 
     return rows.map((row) => ({
       ...row,
-      currentVersion: null,
     }));
   }
 
-  create(input: CreateProductInput): Product {
+  create(input: CreateProductInput, currentVersion: string | null): Product {
     const product = this.normalizeProductInput(input);
     const now = Date.now();
     const statement = this.database.prepare(`
@@ -124,9 +137,10 @@ export class ProductRepository {
         description,
         repository_provider,
         repository_url,
+        current_version,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     statement.run(
@@ -135,16 +149,69 @@ export class ProductRepository {
       product.description,
       product.repositoryProvider,
       product.repositoryUrl,
+      currentVersion,
       now,
       now,
     );
 
     return {
       ...product,
-      currentVersion: null,
+      currentVersion,
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  update(input: UpdateProductInput): Product {
+    const id = input?.id?.trim();
+    const name = input?.name?.trim();
+    const description = input?.description?.trim() || '';
+
+    if (!id) {
+      throw new Error('产品标识不正确');
+    }
+    if (!name) {
+      throw new Error('请输入产品名称');
+    }
+    if (name.length > 100) {
+      throw new Error('产品名称不能超过 100 个字符');
+    }
+    if (description.length > 2000) {
+      throw new Error('产品描述不能超过 2000 个字符');
+    }
+
+    const nameStatement = this.database.prepare(
+      'SELECT id FROM products WHERE name = ? COLLATE NOCASE AND id != ?',
+    );
+    if (nameStatement.get(name, id)) {
+      throw new Error('产品名称已存在');
+    }
+
+    const now = Date.now();
+    const updateStatement = this.database.prepare(`
+      UPDATE products
+      SET name = ?, description = ?, updated_at = ?
+      WHERE id = ?
+    `);
+    const result = updateStatement.run(name, description, now, id);
+    if (Number(result.changes) === 0) {
+      throw new Error('产品不存在或已被删除');
+    }
+
+    const productStatement = this.database.prepare(`
+      SELECT
+        id,
+        name,
+        description,
+        repository_provider AS repositoryProvider,
+        repository_url AS repositoryUrl,
+        current_version AS currentVersion,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM products
+      WHERE id = ?
+    `);
+    return productStatement.get(id) as unknown as Product;
   }
 
   getSettings(): AppSettings {
@@ -222,6 +289,57 @@ export class ProductRepository {
       'SELECT provider FROM provider_connections WHERE provider = ?',
     );
     return Boolean(statement.get(provider));
+  }
+
+  getEncryptedToken(provider: RepositoryProvider): Uint8Array {
+    const statement = this.database.prepare(
+      'SELECT encrypted_token AS encryptedToken FROM provider_connections WHERE provider = ?',
+    );
+    const row = statement.get(provider) as unknown as TokenRow | undefined;
+
+    if (!row?.encryptedToken) {
+      throw new Error('请先在设置中验证对应平台的 Token');
+    }
+
+    return row.encryptedToken;
+  }
+
+  normalizeCreateInput(input: CreateProductInput): CreateProductInput {
+    const product = this.normalizeProductInput(input);
+    return {
+      name: product.name,
+      description: product.description,
+      repositoryProvider: product.repositoryProvider,
+      repositoryUrl: product.repositoryUrl,
+    };
+  }
+
+  assertCanCreate(input: CreateProductInput): void {
+    const product = this.normalizeCreateInput(input);
+    const statement = this.database.prepare(`
+      SELECT name, repository_provider AS repositoryProvider, repository_url AS repositoryUrl
+      FROM products
+      WHERE name = ? COLLATE NOCASE
+         OR (repository_provider = ? AND repository_url = ?)
+      LIMIT 1
+    `);
+    const existing = statement.get(
+      product.name,
+      product.repositoryProvider,
+      product.repositoryUrl,
+    ) as
+      | { name: string; repositoryProvider: RepositoryProvider; repositoryUrl: string }
+      | undefined;
+
+    if (!existing) {
+      return;
+    }
+
+    if (existing.name.toLocaleLowerCase() === product.name.toLocaleLowerCase()) {
+      throw new Error('产品名称已存在');
+    }
+
+    throw new Error('该仓库已被其他产品使用');
   }
 
   close(): void {

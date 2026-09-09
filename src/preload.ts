@@ -2,14 +2,22 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 import type {
   CreateProductInput,
+  RepositoryInspection,
   RepositoryProvider,
+  UpdateProductInput,
 } from './shared/product';
 
 contextBridge.exposeInMainWorld('releaseHub', {
   products: {
     list: () => ipcRenderer.invoke('products:list'),
+    update: (input: UpdateProductInput) =>
+      ipcRenderer.invoke('products:update', input),
     create: (input: CreateProductInput) =>
-      ipcRenderer.invoke('products:create', input),
+      ipcRenderer.invoke('products:create', input, false),
+    inspectRepository: (input: CreateProductInput) =>
+      ipcRenderer.invoke('products:inspect-repository', input),
+    createWithInitialization: (input: CreateProductInput) =>
+      ipcRenderer.invoke('products:create', input, true),
   },
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),

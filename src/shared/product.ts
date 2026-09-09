@@ -18,6 +18,20 @@ export interface CreateProductInput {
   repositoryUrl: string;
 }
 
+export interface UpdateProductInput {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface RepositoryInspection {
+  state: 'ready' | 'needs-initialization';
+  reason: 'managed' | 'empty' | 'missing-manifest' | 'invalid-manifest';
+  defaultBranch: string;
+  currentVersion: string | null;
+  message: string;
+}
+
 export interface ProviderConnection {
   provider: RepositoryProvider;
   configured: boolean;

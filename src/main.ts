@@ -1,11 +1,14 @@
 import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { Buffer } from 'node:buffer';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
 
 import { ProductRepository } from './database/product-repository';
+import { ReleaseHubRepositoryService } from './repository/release-hub-repository-service';
 import type {
   CreateProductInput,
   RepositoryProvider,
+  UpdateProductInput,
   VerifiedConnection,
 } from './shared/product';
 
@@ -21,6 +24,7 @@ if (process.platform === 'win32') {
 }
 
 let productRepository: ProductRepository | undefined;
+const releaseHubRepositoryService = new ReleaseHubRepositoryService();
 
 const getDevelopmentIconPath = (): string =>
   path.join(app.getAppPath(), 'assets', 'icons', 'release-hub.png');
@@ -71,13 +75,78 @@ const getDatabasePath = (): string => {
 
 const registerProductIpcHandlers = (repository: ProductRepository) => {
   ipcMain.handle('products:list', () => repository.list());
-  ipcMain.handle('products:create', (_event, input: CreateProductInput) => {
-    if (!repository.hasVerifiedConnection(input.repositoryProvider)) {
-      throw new Error('请先在设置中验证对应平台的 Token');
-    }
+  ipcMain.handle('products:update', (_event, input: UpdateProductInput) =>
+    repository.update(input),
+  );
+  ipcMain.handle(
+    'products:inspect-repository',
+    (_event, input: CreateProductInput) =>
+      inspectProductRepository(repository, input),
+  );
+  ipcMain.handle(
+    'products:create',
+    async (
+      _event,
+      input: CreateProductInput,
+      allowInitialization: boolean,
+    ) => {
+      const normalizedInput = repository.normalizeCreateInput(input);
+      repository.assertCanCreate(normalizedInput);
+      let inspection = await inspectProductRepository(repository, normalizedInput);
 
-    return repository.create(input);
-  });
+      if (inspection.state === 'needs-initialization') {
+        if (!allowInitialization) {
+          throw new Error('该仓库尚未初始化为 ReleaseHub 管理仓库');
+        }
+
+        inspection = await initializeProductRepository(repository, normalizedInput);
+      }
+
+      return repository.create(normalizedInput, inspection.currentVersion);
+    },
+  );
+};
+
+const getProviderToken = (
+  repository: ProductRepository,
+  provider: RepositoryProvider,
+): string => {
+  if (!repository.hasVerifiedConnection(provider)) {
+    throw new Error('请先在设置中验证对应平台的 Token');
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('当前系统无法读取安全保存的 Token');
+  }
+
+  return safeStorage.decryptString(
+    Buffer.from(repository.getEncryptedToken(provider)),
+  );
+};
+
+const inspectProductRepository = async (
+  repository: ProductRepository,
+  input: CreateProductInput,
+) => {
+  const normalizedInput = repository.normalizeCreateInput(input);
+  const token = getProviderToken(repository, normalizedInput.repositoryProvider);
+  return releaseHubRepositoryService.inspect(
+    normalizedInput,
+    token,
+    repository.getSettings().defaultBranch,
+  );
+};
+
+const initializeProductRepository = async (
+  repository: ProductRepository,
+  input: CreateProductInput,
+) => {
+  const normalizedInput = repository.normalizeCreateInput(input);
+  const token = getProviderToken(repository, normalizedInput.repositoryProvider);
+  return releaseHubRepositoryService.initialize(
+    normalizedInput,
+    token,
+    repository.getSettings().defaultBranch,
+  );
 };
 
 const validateDefaultBranch = (defaultBranch: string): string => {
