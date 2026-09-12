@@ -1,4 +1,5 @@
-export type RepositoryProvider = 'github' | 'gitee';
+export type RepositoryProvider = 'github' | 'gitee' | 'cnb';
+export type SignaturePolicy = 'optional' | 'required';
 
 export interface Product {
   id: string;
@@ -7,6 +8,11 @@ export interface Product {
   currentVersion: string | null;
   repositoryProvider: RepositoryProvider;
   repositoryUrl: string;
+  /** 新建时由全局发布分支确定；旧记录为空，沿用历史的仓库默认分支行为。 */
+  releaseBranch: string | null;
+  /** null 表示旧产品尚未确认签名策略，发布前需要配置。 */
+  signaturePolicy: SignaturePolicy | null;
+  signatureAppId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -16,12 +22,16 @@ export interface CreateProductInput {
   description?: string;
   repositoryProvider: RepositoryProvider;
   repositoryUrl: string;
+  signaturePolicy: SignaturePolicy | null;
+  signatureAppId?: string | null;
 }
 
 export interface UpdateProductInput {
   id: string;
   name: string;
   description?: string;
+  signaturePolicy: SignaturePolicy | null;
+  signatureAppId?: string | null;
 }
 
 export type BuildPlatform = 'macos' | 'windows' | 'android';
@@ -40,6 +50,19 @@ export interface PublishReleaseInput {
   notes?: string;
   channel: 'stable';
   assets: BuildAssetInput[];
+  /** 仅在用户确认覆盖后，回传冲突检查返回的标识。 */
+  overwriteConfirmation?: string;
+}
+
+export type PublishReleaseResult =
+  | { status: 'published'; release: ProductRelease }
+  | { status: 'conflict'; version: string; message: string; confirmation: string };
+
+export interface UpdateSignature {
+  algorithm: 'ed25519';
+  keyId: string;
+  payload: string;
+  signature: string;
 }
 
 export interface ReleaseAsset {
@@ -51,6 +74,7 @@ export interface ReleaseAsset {
   size: number;
   sha256: string;
   downloadUrl: string;
+  updateSignature?: UpdateSignature;
 }
 
 export interface ProductRelease {

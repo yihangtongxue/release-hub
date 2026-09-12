@@ -1,3 +1,4 @@
+import type { ExternalResource } from './shared/repository-provider';
 import { contextBridge, ipcRenderer } from 'electron';
 
 import type {
@@ -10,6 +11,7 @@ import type {
 } from './shared/product';
 
 contextBridge.exposeInMainWorld('releaseHub', {
+  openExternalResource: (key: ExternalResource) => ipcRenderer.invoke('resources:open', key),
   products: {
     list: () => ipcRenderer.invoke('products:list'),
     update: (input: UpdateProductInput) =>

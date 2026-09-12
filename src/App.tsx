@@ -1,3 +1,5 @@
+import { repositoryProviders, repositoryProviderLabels } from './shared/repository-provider';
+import type { ExternalResource } from './shared/repository-provider';
 import {
   AppstoreOutlined,
   ArrowLeftOutlined,
@@ -26,7 +28,9 @@ import {
 } from 'antd';
 import type { MenuProps, TableColumnsType } from 'antd';
 import { useEffect, useRef, useState } from 'react';
+import { SignatureSettingsFields } from './components/SignatureSettingsFields';
 import { buildTargetOptions, stableVersion, targetKey, validatePublishInput } from './shared/release-validation';
+import { formatAssetSize, getReleaseAssetSizeError, releaseAssetLimits } from './shared/release-asset-limits';
 
 import type {
   AppSettings,
@@ -43,7 +47,7 @@ import type {
 
 type PageKey = 'products' | 'settings' | 'versions';
 type ProductFormValues = CreateProductInput;
-type EditProductFormValues = Pick<UpdateProductInput, 'name' | 'description'>;
+type EditProductFormValues = Omit<UpdateProductInput, 'id'>;
 
 interface DraftAsset {
   id: number;
@@ -118,6 +122,10 @@ function App() {
   const [publishForm] = Form.useForm<{ version: string; notes?: string; channel: 'stable' }>();
   const [settingsForm] = Form.useForm<{ defaultBranch: string }>();
   const [messageApi, messageContextHolder] = message.useMessage();
+  const assetSizeErrors = versionProduct ? draftAssets.flatMap((asset) => {
+    const error = asset.file ? getReleaseAssetSizeError(versionProduct.repositoryProvider, asset.file) : null;
+    return error ? [error] : [];
+  }) : [];
 
   const loadProducts = async () => {
     try {
@@ -161,12 +169,13 @@ function App() {
     );
 
   const hasConfiguredProvider =
-    isProviderConfigured('github') || isProviderConfigured('gitee');
+    repositoryProviders.some(isProviderConfigured);
 
   const openCreateProductModal = () => {
     form.resetFields();
     form.setFieldsValue({
-      repositoryProvider: isProviderConfigured('github') ? 'github' : 'gitee',
+      repositoryProvider: repositoryProviders.find(isProviderConfigured) || 'github',
+      signaturePolicy: 'optional',
     });
     setIsCreateModalOpen(true);
   };
@@ -179,10 +188,10 @@ function App() {
         values.defaultBranch,
       );
       setSettings(savedSettings);
-      messageApi.success('默认分支已保存');
+      messageApi.success('新产品发布分支已保存');
     } catch (error) {
       const description = readableErrorMessage(error, '请检查分支名称后重试');
-      messageApi.error(`保存默认分支失败：${description}`);
+      messageApi.error(`保存新产品发布分支失败：${description}`);
     } finally {
       setIsSavingBranch(false);
     }
@@ -209,7 +218,7 @@ function App() {
             .map((connection) => [connection.provider, connection.token]),
         ),
       );
-      messageApi.success(`${provider === 'github' ? 'GitHub' : 'Gitee'} Token 验证成功`);
+      messageApi.success(`${repositoryProviderLabels[provider]} Token 验证成功`);
     } catch (error) {
       const description = readableErrorMessage(error, '请稍后重试');
       messageApi.error(`Token 验证失败：${description}`);
@@ -224,9 +233,12 @@ function App() {
 
   const openEditProductModal = (product: Product) => {
     setEditingProduct(product);
+    editForm.resetFields();
     editForm.setFieldsValue({
       name: product.name,
       description: product.description,
+      signaturePolicy: product.signaturePolicy,
+      signatureAppId: product.signatureAppId,
     });
   };
 
@@ -301,6 +313,11 @@ function App() {
   };
 
   const openPublishVersionModal = () => {
+    if (!versionProduct?.signaturePolicy) {
+      if (versionProduct) openEditProductModal(versionProduct);
+      messageApi.info('请先为该产品选择更新包签名策略并保存');
+      return;
+    }
     setPublishError('');
     setPublishProgress('');
     setDraftAssets([createDraftAsset(Date.now())]);
@@ -331,7 +348,7 @@ function App() {
   };
 
   const publishVersion = async (values: { version: string; notes?: string; channel: 'stable' }) => {
-    if (publishingRef.current || isSelectingFile) return;
+    if (publishingRef.current || isSelectingFile || assetSizeErrors.length > 0) return;
     if (!versionProduct || draftAssets.some((asset) => !asset.file)) {
       setPublishError('请为每个构建产物选择文件');
       return;
@@ -348,11 +365,32 @@ function App() {
       publishingRef.current = true;
       setIsPublishing(true);
       setPublishProgress('校验发布信息');
-      const release = await window.releaseHub.releases.publish(input);
-      setReleases((items) => [release, ...items]);
+      let result = await window.releaseHub.releases.publish(input);
+      while (result.status === 'conflict') {
+        const conflict = result;
+        setPublishProgress('等待确认覆盖已有版本');
+        const confirmed = await new Promise<boolean>((resolve) => {
+          Modal.confirm({
+            title: `版本 ${conflict.version} 已存在，是否覆盖？`,
+            content: conflict.message,
+            okText: '确认覆盖并发布',
+            cancelText: '返回修改',
+            okButtonProps: { danger: true },
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
+        });
+        if (!confirmed) return;
+        setPublishProgress('重新检查并覆盖发布');
+        result = await window.releaseHub.releases.publish({ ...input, overwriteConfirmation: conflict.confirmation });
+      }
+      const { release } = result;
+      setReleases((items) => [release, ...items.filter((item) => item.version !== release.version || item.channel !== release.channel)]);
       setIsPublishVersionModalOpen(false);
       setProducts((items) => items.map((product) => product.id === release.productId
         ? { ...product, currentVersion: release.version } : product));
+      setVersionProduct((product) => product?.id === release.productId
+        ? { ...product, currentVersion: release.version } : product);
       messageApi.success(`版本 ${release.version} 已发布，可使用“校验客户端下载”验证附件`);
     } catch (error) { setPublishError(readableErrorMessage(error, '发布失败，请稍后重试')); }
     finally { publishingRef.current = false; setIsPublishing(false); }
@@ -446,12 +484,13 @@ function App() {
 
     setIsSavingEdit(true);
     try {
-      await window.releaseHub.products.update({
+      const updatedProduct = await window.releaseHub.products.update({
         id: editingProduct.id,
         ...values,
       });
       await loadProducts();
       closeEditProductModal();
+      setVersionProduct((product) => product?.id === updatedProduct.id ? updatedProduct : product);
       messageApi.success('产品信息已保存');
     } catch (error) {
       const description = readableErrorMessage(error, '请检查填写的信息后重试');
@@ -561,6 +600,11 @@ function App() {
     </>
   );
 
+  const openResource = async (key: ExternalResource) => {
+    try { await window.releaseHub.openExternalResource(key); }
+    catch (error) { messageApi.error(readableErrorMessage(error, '无法打开浏览器')); }
+  };
+
   const renderSettingsPage = () => {
     const renderConnection = (provider: RepositoryProvider, label: string) => {
       const connection = settings?.connections.find(
@@ -585,6 +629,17 @@ function App() {
             <div className="connection-account">
               {isConnected ? `已验证账号：${connection?.accountLogin}` : '尚未验证 Token'}
             </div>
+            {provider === 'cnb' && <>
+              <Space wrap>
+                <Button size="small" onClick={() => void openResource('cnb-home')}>CNB 官网</Button>
+                <Button size="small" onClick={() => void openResource('cnb-token')}>创建 Token 指引</Button>
+                <Button size="small" onClick={() => void openResource('cnb-pricing')}>查看免费额度</Button>
+              </Space>
+              <Typography.Text type="secondary">
+                请授权目标仓库：account-profile、repo-basic-info 只读，repo-code、repo-release 读写。
+                发布仓库须公开，账号至少具备开发者权限。单个附件预检小于 5 GB，仍受组织存储额度限制。
+              </Typography.Text>
+            </>}
             <Typography.Text className="token-field-label">访问令牌</Typography.Text>
             <Input.Password
               value={tokens[provider] || ''}
@@ -616,7 +671,7 @@ function App() {
     return (
       <div className="settings-page">
         <Space direction="vertical" size={20} className="settings-stack">
-          <Card className="branch-settings-card" title="默认发布分支" size="small">
+          <Card className="branch-settings-card" title="新产品发布分支" size="small">
             <Form
               form={settingsForm}
               layout="inline"
@@ -624,7 +679,7 @@ function App() {
             >
               <Form.Item
                 name="defaultBranch"
-                rules={[{ required: true, message: '请输入默认分支' }]}
+                rules={[{ required: true, message: '请输入发布分支' }]}
               >
                 <Input placeholder="例如：main" />
               </Form.Item>
@@ -643,6 +698,7 @@ function App() {
             <div className="connection-cards">
               {renderConnection('github', 'GitHub')}
               {renderConnection('gitee', 'Gitee')}
+              {renderConnection('cnb', 'CNB')}
             </div>
           </Card>
         </Space>
@@ -674,6 +730,13 @@ function App() {
         <Typography.Paragraph type="secondary" className="release-history-hint">
           历史记录保存在本机；删除产品或更换设备后不会自动恢复。
         </Typography.Paragraph>
+        <Alert className="release-feedback" showIcon
+          type={versionProduct.signaturePolicy ? 'info' : 'warning'}
+          title={versionProduct.signaturePolicy
+            ? `更新包签名：${versionProduct.signaturePolicy === 'required' ? '必须签名' : '可选'}${versionProduct.signatureAppId ? ` · ${versionProduct.signatureAppId}` : ''}`
+            : '此产品尚未配置签名策略，请编辑产品后再发布。'}
+          action={<Button size="small" onClick={() => openEditProductModal(versionProduct)}>编辑产品</Button>}
+        />
         {releaseLoadError && <Alert type="error" showIcon title={releaseLoadError} />}
         <Table
           className="version-history-table"
@@ -802,16 +865,19 @@ function App() {
               <Radio value="gitee" disabled={!isProviderConfigured('gitee')}>
                 Gitee
               </Radio>
+              <Radio value="cnb" disabled={!isProviderConfigured('cnb')}>CNB</Radio>
             </Radio.Group>
           </Form.Item>
 
           <Form.Item
             label="仓库地址"
+            extra="CNB 示例：https://cnb.cool/组织/仓库；支持多级组织。请使用公开仓库。"
             name="repositoryUrl"
             rules={[{ required: true, message: '请输入仓库地址' }]}
           >
-            <Input placeholder="例如：https://github.com/owner/repository" />
+            <Input placeholder="GitHub / Gitee / CNB 仓库根地址" />
           </Form.Item>
+          <SignatureSettingsFields />
         </Form>
       </Modal>
 
@@ -848,7 +914,7 @@ function App() {
 
           <Form.Item label="代码托管平台">
             <Input
-              value={editingProduct?.repositoryProvider === 'github' ? 'GitHub' : 'Gitee'}
+              value={editingProduct ? repositoryProviderLabels[editingProduct.repositoryProvider] : ''}
               disabled
             />
           </Form.Item>
@@ -856,6 +922,7 @@ function App() {
           <Form.Item label="仓库地址">
             <Input value={editingProduct?.repositoryUrl} disabled />
           </Form.Item>
+          <SignatureSettingsFields />
         </Form>
       </Modal>
 
@@ -871,7 +938,7 @@ function App() {
         closable={!isPublishing && !isSelectingFile}
         keyboard={!isPublishing && !isSelectingFile}
         cancelButtonProps={{ disabled: isPublishing || isSelectingFile }}
-        okButtonProps={{ disabled: isSelectingFile }}
+        okButtonProps={{ disabled: isSelectingFile || assetSizeErrors.length > 0 }}
         confirmLoading={isPublishing}
         onOk={() => publishForm.submit()}
         destroyOnHidden
@@ -907,6 +974,9 @@ function App() {
               <Typography.Text type="secondary" className="asset-section-hint">
                 请确认平台、架构与后缀；文件名无法自动识别真实架构。Android 仅支持 APK。
               </Typography.Text>
+              {versionProduct && <Typography.Text type="secondary" className="asset-section-hint">
+                {releaseAssetLimits[versionProduct.repositoryProvider].label}。
+              </Typography.Text>}
             </div>
             <Button
               type="link"
@@ -918,13 +988,20 @@ function App() {
             </Button>
           </div>
 
+          {assetSizeErrors.length > 0 && <Alert className="release-feedback" type="warning" showIcon
+            title="构建产物超过上传限制，请更换文件后发布"
+            description={<div className="release-error-detail">{assetSizeErrors.map((error, index) => <div key={index}>{error}</div>)}</div>}
+          />}
           <div className="draft-assets">
             {draftAssets.map((asset) => {
               const target = buildTargetOptions[asset.platform];
 
               return (
               <div className="draft-asset" key={asset.id}>
-                <Button className="asset-file-button" title={asset.file ? `${asset.file.fileName}（${(asset.file.size / 1024 / 1024).toFixed(1)} MB）` : '选择文件'} onClick={() => void selectDraftFile(asset.id)}>{asset.file?.fileName || '选择文件'}</Button>
+                <div className="asset-file-selection">
+                  <Button className="asset-file-button" title={asset.file ? `${asset.file.fileName}（${formatAssetSize(asset.file.size)}）` : '选择文件'} onClick={() => void selectDraftFile(asset.id)}>{asset.file?.fileName || '选择文件'}</Button>
+                  {asset.file && <Typography.Text type="secondary" className="asset-file-size">{formatAssetSize(asset.file.size)}</Typography.Text>}
+                </div>
                 <Select
                   value={asset.platform}
                   options={(Object.keys(buildTargetOptions) as BuildPlatform[]).map(

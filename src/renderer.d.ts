@@ -1,3 +1,4 @@
+import type { ExternalResource } from './shared/repository-provider';
 import type {
   AppSettings,
   CreateProductInput,
@@ -8,6 +9,7 @@ import type {
   VerifyDownloadInput,
   DownloadVerification,
   PublishReleaseInput,
+  PublishReleaseResult,
   RepositoryInspection,
   RepositoryProvider,
   UpdateProductInput,
@@ -16,6 +18,7 @@ import type {
 declare global {
   interface Window {
     releaseHub: {
+      openExternalResource: (key: ExternalResource) => Promise<void>;
       products: {
         list: () => Promise<Product[]>;
         update: (input: UpdateProductInput) => Promise<Product>;
@@ -39,7 +42,7 @@ declare global {
       releases: {
         list: (productId: string) => Promise<ProductRelease[]>;
         selectFile: () => Promise<import('./shared/product').SelectedBuildFile | null>;
-        publish: (input: PublishReleaseInput) => Promise<ProductRelease>;
+        publish: (input: PublishReleaseInput) => Promise<PublishReleaseResult>;
         getPublicUpdate: (productId: string) => Promise<PublicUpdate>;
         verifyDownload: (input: VerifyDownloadInput) => Promise<DownloadVerification>;
         onProgress: (callback: (progress: ReleaseProgress) => void) => () => void;

@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { normalizeSignatureSettings } from '../shared/signature-policy';
+import { normalizeRepositoryUrl, repositoryProviders } from '../shared/repository-provider';
 
 import type {
   AppSettings,
@@ -14,16 +16,7 @@ import type {
   VerifiedConnection,
 } from '../shared/product';
 
-interface ProductRow {
-  id: string;
-  name: string;
-  description: string;
-  repositoryProvider: RepositoryProvider;
-  repositoryUrl: string;
-  currentVersion: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
+type ProductRow = Product;
 
 interface MigrationRow {
   version: number;
@@ -117,6 +110,62 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 5,
+    name: '记录新产品指定的发布分支',
+    sql: `
+      ALTER TABLE products ADD COLUMN release_branch TEXT;
+    `,
+  },
+  {
+    version: 6,
+    name: '保留构建产物发布签名',
+    sql: 'ALTER TABLE release_assets ADD COLUMN update_signature TEXT;',
+  },
+  {
+    version: 7,
+    name: '添加产品级更新包签名策略',
+    sql: `
+      ALTER TABLE products ADD COLUMN signature_policy TEXT
+        CHECK (signature_policy IN ('optional', 'required'));
+      ALTER TABLE products ADD COLUMN signature_app_id TEXT;
+    `,
+  },
+  {
+    version: 8,
+    name: '添加 CNB 托管平台并保留现有产品和连接',
+    sql: `
+      CREATE TABLE products_new (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        repository_provider TEXT NOT NULL CHECK (repository_provider IN ('github', 'gitee', 'cnb')),
+        repository_url TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        current_version TEXT,
+        release_branch TEXT,
+        signature_policy TEXT CHECK (signature_policy IN ('optional', 'required')),
+        signature_app_id TEXT,
+        UNIQUE (repository_provider, repository_url)
+      );
+      INSERT INTO products_new SELECT id, name, description, repository_provider, repository_url,
+        created_at, updated_at, current_version, release_branch, signature_policy, signature_app_id FROM products;
+      DROP TABLE products;
+      ALTER TABLE products_new RENAME TO products;
+      CREATE TABLE provider_connections_new (
+        provider TEXT PRIMARY KEY NOT NULL CHECK (provider IN ('github', 'gitee', 'cnb')),
+        encrypted_token BLOB NOT NULL,
+        account_login TEXT NOT NULL,
+        verified_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO provider_connections_new (provider, encrypted_token, account_login, verified_at, updated_at)
+        SELECT provider, encrypted_token, account_login, verified_at, updated_at FROM provider_connections;
+      DROP TABLE provider_connections;
+      ALTER TABLE provider_connections_new RENAME TO provider_connections;
+    `,
+  },
 ];
 
 export class ProductRepository {
@@ -142,6 +191,9 @@ export class ProductRepository {
         repository_provider AS repositoryProvider,
         repository_url AS repositoryUrl,
         current_version AS currentVersion,
+        release_branch AS releaseBranch,
+        signature_policy AS signaturePolicy,
+        signature_app_id AS signatureAppId,
         created_at AS createdAt,
         updated_at AS updatedAt
       FROM products
@@ -154,7 +206,11 @@ export class ProductRepository {
     }));
   }
 
-  create(input: CreateProductInput, currentVersion: string | null): Product {
+  create(
+    input: CreateProductInput,
+    currentVersion: string | null,
+    releaseBranch: string,
+  ): Product {
     const product = this.normalizeProductInput(input);
     const now = Date.now();
     const statement = this.database.prepare(`
@@ -165,9 +221,12 @@ export class ProductRepository {
         repository_provider,
         repository_url,
         current_version,
+        release_branch,
+        signature_policy,
+        signature_app_id,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     statement.run(
@@ -177,6 +236,9 @@ export class ProductRepository {
       product.repositoryProvider,
       product.repositoryUrl,
       currentVersion,
+      releaseBranch,
+      product.signaturePolicy,
+      product.signatureAppId,
       now,
       now,
     );
@@ -184,6 +246,7 @@ export class ProductRepository {
     return {
       ...product,
       currentVersion,
+      releaseBranch,
       createdAt: now,
       updatedAt: now,
     };
@@ -214,13 +277,14 @@ export class ProductRepository {
       throw new Error('产品名称已存在');
     }
 
+    const signatureSettings = normalizeSignatureSettings(input);
     const now = Date.now();
     const updateStatement = this.database.prepare(`
       UPDATE products
-      SET name = ?, description = ?, updated_at = ?
+      SET name = ?, description = ?, signature_policy = ?, signature_app_id = ?, updated_at = ?
       WHERE id = ?
     `);
-    const result = updateStatement.run(name, description, now, id);
+    const result = updateStatement.run(name, description, signatureSettings.signaturePolicy, signatureSettings.signatureAppId, now, id);
     if (Number(result.changes) === 0) {
       throw new Error('产品不存在或已被删除');
     }
@@ -233,6 +297,9 @@ export class ProductRepository {
         repository_provider AS repositoryProvider,
         repository_url AS repositoryUrl,
         current_version AS currentVersion,
+        release_branch AS releaseBranch,
+        signature_policy AS signaturePolicy,
+        signature_app_id AS signatureAppId,
         created_at AS createdAt,
         updated_at AS updatedAt
       FROM products
@@ -257,6 +324,9 @@ export class ProductRepository {
     const statement = this.database.prepare(`
       SELECT id, name, description, repository_provider AS repositoryProvider,
         repository_url AS repositoryUrl, current_version AS currentVersion,
+        release_branch AS releaseBranch,
+        signature_policy AS signaturePolicy,
+        signature_app_id AS signatureAppId,
         created_at AS createdAt, updated_at AS updatedAt
       FROM products WHERE id = ?
     `);
@@ -272,23 +342,34 @@ export class ProductRepository {
     `).all(productId) as unknown as ProductRelease[];
     const assets = this.database.prepare(`
       SELECT id, file_name AS fileName, platform, architecture,
-        package_type AS packageType, size, sha256, download_url AS downloadUrl
+        package_type AS packageType, size, sha256, download_url AS downloadUrl,
+        update_signature AS updateSignatureJson
       FROM release_assets WHERE release_id = ?
     `);
-    return releases.map((release) => ({ ...release, assets: assets.all(release.id) as unknown as ProductRelease['assets'] }));
+    return releases.map((release) => ({ ...release, assets: assets.all(release.id).map((row) => {
+      const { updateSignatureJson, ...asset } = row;
+      return { ...asset, ...(typeof updateSignatureJson === 'string'
+        ? { updateSignature: JSON.parse(updateSignatureJson) } : {}) };
+    }) as unknown as ProductRelease['assets'] }));
   }
 
-  saveRelease(release: ProductRelease): void {
+  saveRelease(release: ProductRelease, overwrite = false): void {
     this.database.exec('BEGIN IMMEDIATE');
     try {
+      if (overwrite) {
+        // 外键级联删除旧附件；与新版本及附件的写入一起提交或回滚。
+        this.database.prepare('DELETE FROM releases WHERE product_id = ? AND version = ? AND channel = ?')
+          .run(release.productId, release.version, release.channel);
+      }
       this.database.prepare(`INSERT INTO releases (id, product_id, version, notes, channel, published_at)
         VALUES (?, ?, ?, ?, ?, ?)`)
         .run(release.id, release.productId, release.version, release.notes, release.channel, release.publishedAt);
       const assetStatement = this.database.prepare(`INSERT INTO release_assets
-        (id, release_id, file_name, platform, architecture, package_type, size, sha256, download_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        (id, release_id, file_name, platform, architecture, package_type, size, sha256, download_url, update_signature)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const asset of release.assets) {
-        assetStatement.run(asset.id, release.id, asset.fileName, asset.platform, asset.architecture, asset.packageType, asset.size, asset.sha256, asset.downloadUrl);
+        assetStatement.run(asset.id, release.id, asset.fileName, asset.platform, asset.architecture, asset.packageType, asset.size, asset.sha256, asset.downloadUrl,
+          asset.updateSignature ? JSON.stringify(asset.updateSignature) : null);
       }
       this.database.prepare('UPDATE products SET current_version = ?, updated_at = ? WHERE id = ?')
         .run(release.version, Date.now(), release.productId);
@@ -315,7 +396,7 @@ export class ProductRepository {
     const connectionByProvider = new Map(
       connectionRows.map((connection) => [connection.provider, connection]),
     );
-    const connections: ProviderConnection[] = ['github', 'gitee'].map(
+    const connections: ProviderConnection[] = repositoryProviders.map(
       (provider) => {
         const connection = connectionByProvider.get(provider as RepositoryProvider);
         return {
@@ -397,6 +478,8 @@ export class ProductRepository {
       description: product.description,
       repositoryProvider: product.repositoryProvider,
       repositoryUrl: product.repositoryUrl,
+      signaturePolicy: product.signaturePolicy,
+      signatureAppId: product.signatureAppId,
     };
   }
 
@@ -458,19 +541,26 @@ export class ProductRepository {
         continue;
       }
 
-      this.database.exec('BEGIN IMMEDIATE');
+      // SQLite 更改 CHECK 约束需重建表；关闭级联删除，保留 releases/附件外键。
+      if (migration.version === 8) this.database.exec('PRAGMA foreign_keys = OFF');
+      let transactionStarted = false;
       try {
+        this.database.exec('BEGIN IMMEDIATE');
+        transactionStarted = true;
         this.database.exec(migration.sql);
+        if (this.database.prepare('PRAGMA foreign_key_check').all().length) {
+          throw new Error('数据库迁移外键校验失败，已取消迁移');
+        }
         addMigration.run(migration.version, migration.name, Date.now());
         this.database.exec('COMMIT');
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        if (transactionStarted) this.database.exec('ROLLBACK');
         throw error;
-      }
+      } finally { this.database.exec('PRAGMA foreign_keys = ON'); }
     }
   }
 
-  private normalizeProductInput(input: CreateProductInput): Omit<Product, 'currentVersion' | 'createdAt' | 'updatedAt'> {
+  private normalizeProductInput(input: CreateProductInput): Omit<Product, 'currentVersion' | 'createdAt' | 'updatedAt' | 'releaseBranch'> {
     if (!input || typeof input !== 'object') {
       throw new Error('产品数据格式不正确');
     }
@@ -491,46 +581,21 @@ export class ProductRepository {
     }
 
     const repositoryProvider = input.repositoryProvider;
-    if (repositoryProvider !== 'github' && repositoryProvider !== 'gitee') {
-      throw new Error('请选择 GitHub 或 Gitee');
+    if (!repositoryProviders.includes(repositoryProvider)) {
+      throw new Error('请选择 GitHub、Gitee 或 CNB');
     }
 
     return {
       id: randomUUID(),
+      ...normalizeSignatureSettings(input),
       name,
       description,
       repositoryProvider,
-      repositoryUrl: this.normalizeRepositoryUrl(
+      repositoryUrl: normalizeRepositoryUrl(
         input.repositoryUrl,
         repositoryProvider,
       ),
     };
   }
 
-  private normalizeRepositoryUrl(
-    rawUrl: string,
-    provider: RepositoryProvider,
-  ): string {
-    let url: URL;
-
-    try {
-      url = new URL(rawUrl.trim());
-    } catch {
-      throw new Error('请输入有效的仓库地址');
-    }
-
-    const expectedHost = provider === 'github' ? 'github.com' : 'gitee.com';
-    const segments = url.pathname.split('/').filter(Boolean);
-
-    if (
-      url.protocol !== 'https:' ||
-      url.hostname !== expectedHost ||
-      segments.length !== 2
-    ) {
-      throw new Error(`请输入有效的 ${provider === 'github' ? 'GitHub' : 'Gitee'} 仓库地址`);
-    }
-
-    const [owner, repository] = segments;
-    return `https://${expectedHost}/${owner}/${repository.replace(/\.git$/, '')}`;
-  }
 }

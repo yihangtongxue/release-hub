@@ -1,4 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
+import { CnbRepositoryClient } from './repository/cnb-repository-client';
+import { externalResources, repositoryProviders, validateReleaseBranch } from './shared/repository-provider';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron';
 import { stat } from 'node:fs/promises';
 import { Buffer } from 'node:buffer';
 import path from 'node:path';
@@ -10,6 +12,7 @@ import { compareVersions, validatePublishInput } from './shared/release-validati
 import type {
   CreateProductInput,
   PublishReleaseInput,
+  PublishReleaseResult,
   RepositoryProvider,
   UpdateProductInput,
   VerifiedConnection,
@@ -100,9 +103,10 @@ const getDatabasePath = (): string => {
 
 const registerProductIpcHandlers = (repository: ProductRepository) => {
   ipcMain.handle('products:list', () => repository.list());
-  ipcMain.handle('products:update', (_event, input: UpdateProductInput) =>
-    repository.update(input),
-  );
+  ipcMain.handle('products:update', (_event, input: UpdateProductInput) => {
+    if (activeReleases.has(input?.id?.trim())) throw new Error('该产品正在发布或校验，请完成后再编辑');
+    return repository.update(input);
+  });
   ipcMain.handle('products:delete', (_event, id: string) => {
     if (activeReleases.has(id)) throw new Error('该产品正在发布或校验，请完成后再删除');
     repository.delete(id);
@@ -122,7 +126,7 @@ const registerProductIpcHandlers = (repository: ProductRepository) => {
     selectedFiles.get(event.sender.id)?.add(filePath);
     return { filePath, fileName: path.basename(filePath), size: file.size };
   });
-  ipcMain.handle('releases:publish', async (event, rawInput: PublishReleaseInput) => {
+  ipcMain.handle('releases:publish', async (event, rawInput: PublishReleaseInput): Promise<PublishReleaseResult> => {
     const input = validatePublishInput(rawInput);
     if (activeReleases.has(input.productId)) throw new Error('该产品正在处理，请勿重复提交');
     activeReleases.add(input.productId);
@@ -135,19 +139,23 @@ const registerProductIpcHandlers = (repository: ProductRepository) => {
         if (!selectedFiles.get(event.sender.id)?.has(asset.filePath)) throw new Error('请通过选择文件按钮重新选择安装包');
       }
       const product = repository.getById(input.productId);
+      let localVersionExists = product.currentVersion === input.version;
       for (const release of repository.listReleases(product.id)) {
-        if (compareVersions(input.version, release.version) <= 0) throw new Error(`版本必须高于本地已发布版本 ${release.version}`);
+        if (compareVersions(input.version, release.version) < 0) throw new Error(`版本不能低于本地已发布版本 ${release.version}`);
+        if (release.version === input.version) localVersionExists = true;
       }
-      if (product.currentVersion && compareVersions(input.version, product.currentVersion) <= 0) throw new Error(`版本必须高于当前版本 ${product.currentVersion}`);
+      if (product.currentVersion && compareVersions(input.version, product.currentVersion) < 0) throw new Error(`版本不能低于当前版本 ${product.currentVersion}`);
       token = getProviderToken(repository, product.repositoryProvider);
-      const release = await releaseHubRepositoryService.publish(product, input, token, repository.getSettings().defaultBranch, progress);
+      const result = await releaseHubRepositoryService.publish(product, input, token, repository.getSettings().defaultBranch, progress, localVersionExists);
+      if (result.status === 'conflict') return result;
+      const { release } = result;
       progress('保存本地版本历史');
-      try { repository.saveRelease(release); }
+      try { repository.saveRelease(release, Boolean(input.overwriteConfirmation)); }
       catch {
         throw new Error(`远端版本 ${release.version}、附件和更新清单已发布成功，但本地历史保存失败。请检查磁盘空间并保留此提示，不要重复发布。远端地址：${product.repositoryUrl}/releases`);
       }
       progress('发布完成');
-      return release;
+      return result;
     } catch (error) {
       let detail = error instanceof Error ? error.message : '发布失败，请稍后重试';
       if (token) detail = detail.split(token).join('[已隐藏]').split(encodeURIComponent(token)).join('[已隐藏]');
@@ -191,7 +199,11 @@ const registerProductIpcHandlers = (repository: ProductRepository) => {
         inspection = await initializeProductRepository(repository, normalizedInput);
       }
 
-      return repository.create(normalizedInput, inspection.currentVersion);
+      return repository.create(
+        normalizedInput,
+        inspection.currentVersion,
+        inspection.defaultBranch,
+      );
     },
   );
 };
@@ -238,6 +250,7 @@ const inspectProductRepository = async (
     normalizedInput,
     token,
     repository.getSettings().defaultBranch,
+    repository.getSettings().defaultBranch,
   );
 };
 
@@ -251,36 +264,28 @@ const initializeProductRepository = async (
     normalizedInput,
     token,
     repository.getSettings().defaultBranch,
+    repository.getSettings().defaultBranch,
   );
 };
 
-const validateDefaultBranch = (defaultBranch: string): string => {
-  const branch = defaultBranch?.trim();
-
-  if (!branch) {
-    throw new Error('请输入默认分支');
-  }
-
-  if (branch.length > 255 || /[\s~^:?*\[\\]/.test(branch)) {
-    throw new Error('默认分支名称格式不正确');
-  }
-
-  return branch;
-};
+const validateDefaultBranch = validateReleaseBranch;
 
 const verifyProviderToken = async (
   provider: RepositoryProvider,
   token: string,
 ): Promise<VerifiedConnection> => {
-  if (provider !== 'github' && provider !== 'gitee') {
+  if (!repositoryProviders.includes(provider)) {
     throw new Error('不支持的代码托管平台');
   }
 
-  const normalizedToken = token?.trim();
+  const normalizedToken = typeof token === 'string' ? token.trim() : '';
 
   if (!normalizedToken) {
     throw new Error('请输入 Token');
   }
+
+  if (normalizedToken.length > 8192 || /[\s\x00-\x1f\x7f]/.test(normalizedToken)) throw new Error('Token 格式不正确');
+  if (provider === 'cnb') return { provider, accountLogin: await CnbRepositoryClient.verifyToken(normalizedToken), verifiedAt: Date.now() };
 
   const request =
     provider === 'github'
@@ -319,6 +324,10 @@ const verifyProviderToken = async (
 };
 
 const registerSettingsIpcHandlers = (repository: ProductRepository) => {
+  ipcMain.handle('resources:open', async (_event, key: unknown) => {
+    if (typeof key !== 'string' || !Object.prototype.hasOwnProperty.call(externalResources, key)) throw new Error('不支持的外部入口');
+    await shell.openExternal(externalResources[key as keyof typeof externalResources]);
+  });
   ipcMain.handle('settings:get', () => getSettingsForRenderer(repository));
   ipcMain.handle('settings:update-default-branch', (_event, defaultBranch: string) => {
     repository.updateDefaultBranch(validateDefaultBranch(defaultBranch));

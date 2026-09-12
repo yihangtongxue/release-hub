@@ -99,6 +99,10 @@ body {
   gap: 20px;
 }
 
+.connection-cards > :last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 .settings-card,
 .branch-settings-card,
 .provider-settings-card {
@@ -216,6 +220,22 @@ body {
   padding-inline: 6px;
 }
 
+.asset-file-selection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.asset-file-button {
+  width: 100%;
+  min-width: 0;
+  padding-inline: 6px;
+}
+
+.asset-file-size {
+  font-size: 12px;
+}
+
 .asset-file-button > span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -247,6 +267,11 @@ body {
 
 .create-product-modal .ant-modal-title {
   font-size: 16px;
+}
+
+.create-product-modal .ant-modal-body {
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
 }
 
 .create-product-modal .ant-form-item {

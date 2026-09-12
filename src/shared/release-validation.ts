@@ -58,6 +58,10 @@ export function validateTarget(asset: Pick<BuildAssetInput, 'platform' | 'archit
 export function validatePublishInput(input: PublishReleaseInput): PublishReleaseInput {
   if (!input || typeof input.productId !== 'string' || !input.productId) throw new Error('请选择产品');
   const version = stableVersion(input.version);
+  if (input.overwriteConfirmation !== undefined &&
+      (typeof input.overwriteConfirmation !== 'string' || !/^[a-f0-9]{64}$/.test(input.overwriteConfirmation))) {
+    throw new Error('覆盖确认信息无效，请重新发布并确认');
+  }
   if (input.channel !== 'stable') throw new Error('当前仅支持稳定版渠道');
   if (input.notes != null && (typeof input.notes !== 'string' || input.notes.length > 20000)) throw new Error('更新说明最多 20000 个字符');
   if (!Array.isArray(input.assets) || !input.assets.length || input.assets.length > 20) throw new Error('请添加 1 至 20 个构建产物');
